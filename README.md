@@ -118,11 +118,14 @@ running < 3 MB. Python is not involved.
 ## OLED live now-playing (independent, no stock app)
 
 - Pipeline: `nowplaying.exe` (TSV `status\ttitle\tartist` / `NO-SESSION`)
-  -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`: top bar = play
-  state left + date right, scrolling "Title - Artist" below; no clock, so
-  frames never go stale and the loop re-uploads only on track/state change.
-  Idle/short = STATIC_N=4 identical frames) -> pack -> `oledN`.
-- Frame count dynamic via `pick_plan`: STATIC_N=4 when short/idle (step 0);
+  -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`; layout: top bar =
+  drawn transport glyph left (play triangle / pause bars) + date right,
+  scrolling **title** hero below the rule, **artist** static centered at
+  the bottom (ellipsized). No clock, so frames never go stale and the loop
+  re-uploads only on track/state change. Idle = date + "NO MEDIA";
+  short/idle = STATIC_N=4 identical frames) -> pack -> `oledN`.
+- Frame count dynamic via `pick_plan` (computed on the **title** width):
+  STATIC_N=4 when short/idle (step 0);
   else use as many frames as the hardware cap (MAXN=128) allows, with the
   smallest integer STEP = ceil((tw+MIN_GAP)/128) -> slowest possible
   marquee, N*STEP==L exact seam (frameN byte-identical frame0); stale PNGs

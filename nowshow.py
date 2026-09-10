@@ -28,6 +28,8 @@ MAXN = 128  # hardware frame cap (verified: 128 frames play, 129+ wraps; CONFIG 
 MIN_GAP = 32
 STATIC_N = 4
 X0 = 4  # small left margin for scroll start
+HERO_Y = 18  # title scroll top
+ART_Y = 46  # artist line top
 NP = r"D:\Project\keyboard\timeless82\nowplaying\bin\Release\net8.0-windows10.0.22621.0\nowplaying.exe"
 
 
@@ -73,39 +75,62 @@ def render_idle():
     for i in range(STATIC_N):
         im, d = new()
         f = font(20)
-        d.text(((W - textw(d, date, f)) // 2, 22), date, font=f, fill=255)
+        d.text(((W - textw(d, date, f)) // 2, 14), date, font=f, fill=255)
+        f2 = font(11)
+        s = "NO MEDIA"
+        d.text(((W - textw(d, s, f2)) // 2, 44), s, font=f2, fill=255)
         frames.append(im)
     return frames, "idle", 0, 0, STATIC_N
 
 
+def state_glyph(d, playing, x=3, y=2):
+    """Drawn transport glyph: filled right triangle (play) or two bars (pause)."""
+    if playing:
+        d.polygon([(x, y), (x, y + 9), (x + 7, y + 4)], fill=255)
+    else:
+        d.rectangle([x, y, x + 2, y + 9], fill=255)
+        d.rectangle([x + 5, y, x + 7, y + 9], fill=255)
+
+
+def fit_text(d, s, f, maxw):
+    """Ellipsize s with '...' until it fits maxw."""
+    if textw(d, s, f) <= maxw:
+        return s
+    while s and textw(d, s + "...", f) > maxw:
+        s = s[:-1]
+    return (s + "...") if s else ""
+
+
 def render_track(title, artist, playing):
     tmp_im, tmp_d = new()
-    fl = font(20)
-    fi = font(12)
-    combo = title + (" - " + artist if artist else "")
-    tw = textw(tmp_d, combo, fl)
+    fl = font(21)
+    fi = font(11)
+    fa = font(12)
+    tw = textw(tmp_d, title, fl)
     date = datetime.now().strftime("%a %d %b").upper()
-    status = ("> " if playing else "|| ") + ("PLAYING" if playing else "PAUSED")
     n, step, gap_used = pick_plan(tw)
     L = tw + gap_used
     frames = []
     for i in range(n):
         im, d = new()
-        d.text((2, 1), status, font=fi, fill=255)
-        dw = textw(d, date, fi)  # date top-right, where the clock used to be
-        d.text((W - 2 - dw, 1), date, font=fi, fill=255)
-        d.line([(0, 15), (W - 1, 15)], fill=255)
+        state_glyph(d, playing, 3, 2)
+        dw = textw(d, date, fi)
+        d.text((W - 3 - dw, 1), date, font=fi, fill=255)
+        d.line([(0, 14), (W - 1, 14)], fill=255)
         if step == 0:
-            d.text(((W - tw) // 2, 22), combo, font=fl, fill=255)
+            d.text((max(3, (W - tw) // 2), HERO_Y), title, font=fl, fill=255)
         else:
             x = X0 - i * step
             k = math.floor((0 - x - tw) / L)
             while x + k * L < W:
                 if x + k * L + tw > 0:
-                    d.text((x + k * L, 22), combo, font=fl, fill=255)
+                    d.text((x + k * L, HERO_Y), title, font=fl, fill=255)
                 k += 1
+        a = fit_text(d, artist, fa, W - 6)
+        aw = textw(d, a, fa)
+        d.text((max(3, (W - aw) // 2), ART_Y), a, font=fa, fill=255)
         frames.append(im)
-    return frames, combo, step, gap_used, n
+    return frames, title, step, gap_used, n
 
 
 def get_frames():
