@@ -49,9 +49,10 @@ def main(argv):
     with open(JSON, encoding="utf-8-sig") as f:
         data = json.load(f)
     frames = data["Frame"]
-    nslots = len(frames)
-    assert nslots == NSLOTS, f"expected {NSLOTS} slots, got {nslots}"
     assert all(len(s) == SLOT for s in frames), "unexpected slot size"
+    while len(frames) < len(arts):  # app compacts slots (30->7 seen); extend
+        frames.append([0] * SLOT)
+    nslots = len(frames)
     if not os.path.exists(BAK):
         shutil.copy2(JSON, BAK)
         print("backup:", BAK)

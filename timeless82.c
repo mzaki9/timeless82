@@ -8,6 +8,7 @@
 #include <hidsdi.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 // MinGW may miss these with plain includes; declare explicitly.
 extern void __stdcall HidD_GetHidGuid(LPGUID HidGuid);
@@ -580,27 +581,29 @@ static int cmd_oled(int argc, char **argv) {
 // payload[35..37]=39 55 18 interval bytes as captured (abs43..45).
 // Only FF1C:0092 on wired 320F:5055 (open_hid refuses FFEF);
 // never sends 0xBE 0xFC / 0xBE 0xEE.
-// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=57]. Dynamic count 1..30:
+// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]. Dynamic count 1..30:
 // INIT(0x01)x1, IMAGE(0x21, 56B chunks, pos 0..N*1024-1),
 // COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
-// CONFIG = 56 zero bytes except payload[22]=0x03, payload[33]=disp_idx
-// (abs41, 0-based screen index: 4 = screen 5 user anim),
-// payload[34]=nframes (abs42),
-// payload[35]=interval (abs43, captured 0x39=57; larger = slower),
-// payload[36..37]=55 18 as captured (abs44..45).
+// CONFIG layout (offsets into the 56B payload = config buffer from byte 0;
+// gmk87-c-spec 240x135 sibling, confirmed by capture):
+//   [22]=0x03 magic, [33]=disp_idx (0-based screen index: 4 = screen 5),
+//   [34]=nframes, [35..37]=BCD clock sec/min/hour (capture 39 55 18 = 18:55:57),
+//   [43..44]=frame interval u16 LE MILLISECONDS (capture 00 00;
+//   larger = slower; old oled used 100ms). Earlier oledN wrongly wrote the
+//   interval into the clock byte [35], so the knob had no visible effect.
 // Only FF1C:0092 on wired 320F:5055 (open_hid refuses FFEF);
 // never sends 0xBE 0xFC / 0xBE 0xEE.
 static int cmd_oledN(int argc, char **argv) {
     if (argc < 4) {
-        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=57]\n");
+        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]\n");
         return 2;
     }
     int nframes = atoi(argv[3]);
     int dispidx = argc >= 5 ? atoi(argv[4]) : 4;
-    int interval = argc >= 6 ? atoi(argv[5]) : 57;
+    int interval = argc >= 6 ? atoi(argv[5]) : 150;
     if (nframes < 1 || nframes > 30) { printf("bad NFRAMES (1..30)\n"); return 2; }
     if (dispidx < 0 || dispidx > 5) { printf("bad DISP_IDX (0..5, 4=screen 5)\n"); return 2; }
-    if (interval < 1 || interval > 255) { printf("bad INTERVAL (1..255)\n"); return 2; }
+    if (interval < 1 || interval > 60000) { printf("bad INTERVAL (1..60000 ms)\n"); return 2; }
     FILE *f = fopen(argv[2], "rb");
     if (!f) { printf("cannot open %s\n", argv[2]); return 1; }
     const long want = (long)nframes * 1024L;
@@ -635,7 +638,16 @@ static int cmd_oledN(int argc, char **argv) {
     cfg[22] = 0x03;
     cfg[33] = (unsigned char)dispidx;
     cfg[34] = (unsigned char)nframes;
-    cfg[35] = (unsigned char)interval; cfg[36] = 0x55; cfg[37] = 0x18;
+    // [35..37] BCD clock (seconds, minutes, hours) — same field stock sent.
+    time_t now = time(NULL); struct tm *lt = localtime(&now);
+    if (lt) {
+        cfg[35] = (unsigned char)(((lt->tm_sec / 10) << 4) | (lt->tm_sec % 10));
+        cfg[36] = (unsigned char)(((lt->tm_min / 10) << 4) | (lt->tm_min % 10));
+        cfg[37] = (unsigned char)(((lt->tm_hour / 10) << 4) | (lt->tm_hour % 10));
+    }
+    // [43..44] frame interval u16 LE milliseconds: larger = slower.
+    cfg[43] = (unsigned char)(interval & 0xFF);
+    cfg[44] = (unsigned char)((interval >> 8) & 0xFF);
     int ok = 1, r;
     r = ff1c_sendA(h, 0x02, 0, 0, NULL, 1); printf("COMMIT %s\n", r ? "ack" : "NO-ACK"); ok &= r;
     r = ff1c_sendA(h, 0x01, 0, 0, NULL, 1); printf("INIT %s\n", r ? "ack" : "NO-ACK"); ok &= r;

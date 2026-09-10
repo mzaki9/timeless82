@@ -103,15 +103,16 @@ running < 3 MB. Python is not involved.
 
 ## OLED 30-frame upload (Frida-proven, no stock app)
 
-- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=57]`: FILE = N concatenated
+- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]`: FILE = N concatenated
   1024B frames (N=1..30), column-major 1-bit MSB-top
   (byte[c*8+pg] bit 7-k = pixel (pg*8+k, c)). (`oled30` = alias.)
 - Sequence: INIT(0x01), IMAGE(0x21, 56B chunks pos 0..N*1024-1),
   COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
-- CONFIG = 56B, all zero except payload[22]=0x03, payload[33]=disp_idx
-  (abs41, 0-based screen: 4 = screen 5 user anim), payload[34]=N (abs42),
-  payload[35]=interval (abs43, stock 57; larger = slower),
-  payload[36..37]=55 18 (abs44..45).
+- CONFIG = 56B zero except `[22]=0x03`, `[33]=disp_idx` (0-based screen:
+  4 = screen 5 user anim), `[34]=N`, `[35..37]=BCD clock` sec/min/hour
+  (capture `39 55 18` = 18:55:57), `[43..44]=frame interval u16 LE ms`
+  (larger = slower; capture 0, old `oled` used 100). Note: the earlier
+  `oledN` bug wrote interval into clock byte `[35]`, so the knob did nothing.
 
 ## OLED live now-playing (independent, no stock app)
 
@@ -132,11 +133,11 @@ running < 3 MB. Python is not involved.
   chunks pos 0..N*1024-1), COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT.
   No 0x23. Frames = Nx1024B packed col-major MSB-top
   (`byte[c*8+pg]` bit `7-k` = pixel `(pg*8+k, c)`); CONFIG 56B zero except
-  `payload[22]=0x03, payload[33]=disp_idx(4=screen 5), payload[34]=N,
-  payload[35]=interval, payload[36..37]=55 18`.
+  `[22]=0x03, [33]=disp_idx(4=screen 5), [34]=N, [35..37]=BCD clock,
+  [43..44]=frame interval u16 LE ms`.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
-  render+pack only, `--interval MS` frame time default 120, `--disp I`
-  default 4); e.g. slower: `--interval 180`; faster: `--interval 80`.
+  render+pack only, `--interval MS` frame time default 150, `--disp I`
+  default 4); e.g. slower: `--interval 300`; faster: `--interval 80`.
 - Safety: wired `320F:5055` only, `FF1C:0092`; never `FFEF`/MI_02, never
   `0xBE FC`/`0xBE EE`.
 - Check screen 5 (slots 0-3 animation); revert via stock app Apply.

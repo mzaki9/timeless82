@@ -11,8 +11,8 @@ Direct path (--direct): imports nowshow (same process, no subprocess),
 packs Nx1024B bin (column-major MSB-top) and uploads with
 timeless82.exe oledN (screen 5 = disp 4, interval slows the scroll).
 --dry renders (+packs in direct mode) without uploading or touching JSON.
---interval MS sets frame interval (default 120, captured stock 57;
-larger = slower). --disp I sets screen index (default 4 = screen 5).
+--interval MS sets frame interval (default 150; larger = slower).
+--disp I sets screen index (default 4 = screen 5).
 
 Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [interval_sec=5]
 """
@@ -27,7 +27,7 @@ BIN = HERE + r"\npN.bin"
 W, H = 128, 64
 MAXN = 30
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
-INTERVAL = 120  # frame interval: larger = slower (stock captured 57)
+INTERVAL = 150  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
 
 sys.path.insert(0, HERE)
 import nowshow
@@ -158,9 +158,9 @@ def main(argv):
         if a == "--disp" and i + 1 < len(args) and args[i + 1].isdigit():
             disp = min(max(int(args[i + 1]), 0), 5)
         if a in ("--interval", "--speed") and i + 1 < len(args) and args[i + 1].isdigit():
-            interval = min(max(int(args[i + 1]), 1), 255)
+            interval = min(max(int(args[i + 1]), 1), 60000)
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
-            interval = min(max(int(a.split("=", 1)[1]), 1), 255)
+            interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
     poll = 5
     for a in argv[1:]:
         if a.isdigit():
@@ -172,24 +172,28 @@ def main(argv):
     refresh = (lambda: refresh_direct(dry, disp, interval)) if direct else \
               (refresh_dry_json if dry else refresh_json)
     while True:
-        cur = current()
-        now_min = time.strftime("%H:%M")
-        tick = (cur != last) or (now_min != last_tick_min and cur != "ERR")
-        # ponytail: clock baked into frames goes stale within the minute.
-        # Refresh on minute flip keeps it ticking. Upgrade path: overlay
-        # clock at upload time instead of re-rendering all frames.
-        if tick:
-            if cur != "ERR":
-                print(f"[{time.strftime('%H:%M:%S')}] change: {cur[:80]}",
-                      flush=True)
-                if refresh():
-                    last = cur
-                    last_tick_min = now_min
-            else:
-                time.sleep(poll)
-                if once:
-                    return 0
-                continue
+        try:
+            cur = current()
+            now_min = time.strftime("%H:%M")
+            tick = (cur != last) or (now_min != last_tick_min and cur != "ERR")
+            # ponytail: clock baked into frames goes stale within the minute.
+            # Refresh on minute flip keeps it ticking. Upgrade path: overlay
+            # clock at upload time instead of re-rendering all frames.
+            if tick:
+                if cur != "ERR":
+                    print(f"[{time.strftime('%H:%M:%S')}] change: {cur[:80]}",
+                          flush=True)
+                    if refresh():
+                        last = cur
+                        last_tick_min = now_min
+                else:
+                    time.sleep(poll)
+                    if once:
+                        return 0
+                    continue
+        except Exception:
+            import traceback
+            traceback.print_exc()
         if once:
             return 0
         time.sleep(poll)
