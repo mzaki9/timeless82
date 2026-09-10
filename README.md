@@ -141,6 +141,27 @@ running < 3 MB. Python is not involved.
   `0xBE FC`/`0xBE EE`.
 - Check screen 5 (slots 0-3 animation); revert via stock app Apply.
 
+### SMTC hang (media poll never returns)
+
+`nowplaying.exe` calls `GlobalSystemMediaTransportControlsSessionManager.RequestAsync()`,
+which activates the **Now Playing Session Manager Service**
+(`NPSMSvc` / `npsm.dll`) through the per-user instance `NPSMSvc_<id>`
+(e.g. `NPSMSvc_cdc43`, a `svchost -k LocalService -p`). If that broker wedges,
+`RequestAsync` blocks forever in an out-of-process LPC reply and every poll
+times out (`System` log shows SCM 7011: 90000 ms transaction timeout from
+`NPSMSvc_<id>`).
+
+Restart the broker (no admin needed; the isolated svchost hosts only this
+service, and SCM demand-starts it again on the next call):
+
+```powershell
+$pid = (sc.exe queryex NPSMSvc_cdc43 | Select-String 'PID').ToString().Split(':')[1].Trim()
+taskkill /F /PID $pid
+```
+
+`Program.cs` also caps the whole call at 4 s and prints `NO-SESSION` on timeout
+(plus per-stage timing on stderr), so a wedge can never stall `nowlive.py`.
+
 ## Safety rules
 
 1. Wired mode only (`320F:5055` present). Never send anything to `FFEF`/MI_02.
