@@ -200,17 +200,14 @@ def main(argv):
           f"idle_gate={'on' if gate_upload else 'off'}"
           + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
     last = None
-    last_tick_min = None
     refresh = (lambda: refresh_direct(dry, disp, interval)) if direct else \
               (refresh_dry_json if dry else refresh_json)
     while True:
         try:
             cur = current()
-            now_min = time.strftime("%H:%M")
-            tick = (cur != last) or (now_min != last_tick_min and cur != "ERR")
-            # ponytail: clock baked into frames goes stale within the minute.
-            # Refresh on minute flip keeps it ticking. Upgrade path: overlay
-            # clock at upload time instead of re-rendering all frames.
+            # No clock in the frames, so they stay valid over time: only a
+            # track/state change (cur != last) needs a re-upload.
+            tick = (cur != last)
             if tick:
                 if cur != "ERR":
                     if gate_upload and idle_ms() < idle_gate:
@@ -222,7 +219,6 @@ def main(argv):
                               flush=True)
                         if refresh():
                             last = cur
-                            last_tick_min = now_min
                 else:
                     time.sleep(poll)
                     if once:

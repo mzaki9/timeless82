@@ -118,16 +118,18 @@ running < 3 MB. Python is not involved.
 ## OLED live now-playing (independent, no stock app)
 
 - Pipeline: `nowplaying.exe` (TSV `status\ttitle\tartist` / `NO-SESSION`)
-  -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`: status+clock /
-  scrolling "Title - Artist" / date; idle/short = STATIC_N=4 identical
-  frames) -> pack -> `oledN`.
+  -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`: top bar = play
+  state left + date right, scrolling "Title - Artist" below; no clock, so
+  frames never go stale and the loop re-uploads only on track/state change.
+  Idle/short = STATIC_N=4 identical frames) -> pack -> `oledN`.
 - Frame count dynamic via `pick_plan`: STATIC_N=4 when short/idle (step 0);
   else use as many frames as the hardware cap (MAXN=128) allows, with the
   smallest integer STEP = ceil((tw+MIN_GAP)/128) -> slowest possible
   marquee, N*STEP==L exact seam (frameN byte-identical frame0); stale PNGs
   >= N deleted. Speed is dialed further with the CONFIG interval byte.
 - JSON path (default, no HID): `nowlive.py` re-renders on track/state
-  change, `setframes.py` writes N PNGs into slots 0..N-1 (grows the slot
+  change (no per-minute refresh anymore), `setframes.py` writes N PNGs into
+  slots 0..N-1 (grows the slot
   array up to 120 as needed). Direct path: `nowlive.py --direct` packs N
   frames -> `npN.bin` -> `oledN FILE NFRAMES`.
 - Wire: 64B Layout-A `[0]=0x04 [1..2]=checksum u16LE sum[3..63] [3]=cmd

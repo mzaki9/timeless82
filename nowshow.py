@@ -4,9 +4,10 @@
 Usage: nowshow.py -> anim_np_0..N-1.png (then deliver via setframes.py
 or nowlive.py --direct pack+upload). Stale anim_np_*.png >= N are deleted.
 
-Layout: top status bar (play state + clock), one scrolling line
-"Title - Artist" running left at constant speed with wraparound,
-bottom static date. Idle (nothing playing): big clock. Short text
+Layout: top status bar (play state left, date right), one scrolling line
+"Title - Artist" running left at constant speed with wraparound. Idle
+(nothing playing): centered date. No clock content, so frames never go
+stale: the loop re-uploads only when the track/state changes. Short text
 renders identical static frames (no pointless motion).
 
 Scroll: dynamic frame count. L=tw+GAPp (text + blank gap). The device
@@ -67,16 +68,12 @@ def new():
 
 
 def render_idle():
-    now = datetime.now()
+    date = datetime.now().strftime("%a %d %b").upper()
     frames = []
     for i in range(STATIC_N):
         im, d = new()
-        f = font(34)
-        t = now.strftime("%H:%M")
-        d.text(((W - textw(d, t, f)) // 2, 8), t, font=f, fill=255)
-        f2 = font(14)
-        dt = now.strftime("%a %d %b").upper()
-        d.text(((W - textw(d, dt, f2)) // 2, 46), dt, font=f2, fill=255)
+        f = font(20)
+        d.text(((W - textw(d, date, f)) // 2, 22), date, font=f, fill=255)
         frames.append(im)
     return frames, "idle", 0, 0, STATIC_N
 
@@ -87,9 +84,7 @@ def render_track(title, artist, playing):
     fi = font(12)
     combo = title + (" - " + artist if artist else "")
     tw = textw(tmp_d, combo, fl)
-    now = datetime.now()
-    clock = now.strftime("%H:%M")
-    date = now.strftime("%a %d %b").upper()
+    date = datetime.now().strftime("%a %d %b").upper()
     status = ("> " if playing else "|| ") + ("PLAYING" if playing else "PAUSED")
     n, step, gap_used = pick_plan(tw)
     L = tw + gap_used
@@ -97,8 +92,8 @@ def render_track(title, artist, playing):
     for i in range(n):
         im, d = new()
         d.text((2, 1), status, font=fi, fill=255)
-        cw = textw(d, clock, fi)
-        d.text((W - 2 - cw, 1), clock, font=fi, fill=255)
+        dw = textw(d, date, fi)  # date top-right, where the clock used to be
+        d.text((W - 2 - dw, 1), date, font=fi, fill=255)
         d.line([(0, 15), (W - 1, 15)], fill=255)
         if step == 0:
             d.text(((W - tw) // 2, 22), combo, font=fl, fill=255)
@@ -109,8 +104,6 @@ def render_track(title, artist, playing):
                 if x + k * L + tw > 0:
                     d.text((x + k * L, 22), combo, font=fl, fill=255)
                 k += 1
-        dw = textw(d, date, fi)
-        d.text(((W - dw) // 2, 50), date, font=fi, fill=255)
         frames.append(im)
     return frames, combo, step, gap_used, n
 
