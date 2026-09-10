@@ -1,0 +1,16 @@
+# build outputs
+*.exe
+*.bin
+__pycache__/
+*.pyc
+nowplaying/bin/
+nowplaying/obj/
+.vs/
+# generated frames
+anim_np_*.png
+anim_bounce_*.png
+anim_scroll_*.png
+anim_name_*.png
+zaname_*.png
+# captures / logs
+*.log
