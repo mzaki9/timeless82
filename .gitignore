@@ -12,5 +12,6 @@ anim_bounce_*.png
 anim_scroll_*.png
 anim_name_*.png
 zaname_*.png
+cnt_*.png
 # captures / logs
 *.log

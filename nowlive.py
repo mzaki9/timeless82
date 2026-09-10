@@ -11,7 +11,7 @@ Direct path (--direct): imports nowshow (same process, no subprocess),
 packs Nx1024B bin (column-major MSB-top) and uploads with
 timeless82.exe oledN (screen 5 = disp 4, interval slows the scroll).
 --dry renders (+packs in direct mode) without uploading or touching JSON.
---interval MS sets frame interval (default 150; larger = slower).
+--interval MS sets frame interval (default 1000; larger = slower).
 --disp I sets screen index (default 4 = screen 5).
 
 Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [interval_sec=5]
@@ -25,9 +25,9 @@ NP = HERE + r"\nowplaying\bin\Release\net8.0-windows10.0.22621.0\nowplaying.exe"
 EXE = HERE + r"\timeless82.exe"
 BIN = HERE + r"\npN.bin"
 W, H = 128, 64
-MAXN = 30
+MAXN = 128
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
-INTERVAL = 150  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
+INTERVAL = 1000  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
 
 sys.path.insert(0, HERE)
 import nowshow

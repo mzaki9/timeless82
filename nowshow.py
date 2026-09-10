@@ -9,13 +9,13 @@ Layout: top status bar (play state + clock), one scrolling line
 bottom static date. Idle (nothing playing): big clock. Short text
 renders identical static frames (no pointless motion).
 
-Scroll: dynamic frame count. L=tw+GAPp (text + blank gap). Fixed small
-STEP (3..8 px/frame = smooth); N=ceil((tw+MIN_GAP)/STEP) capped at 30
-(hardware slot count). N*STEP == L exactly, so hypothetical frameN
-renders byte-identical to frame0: zero loop snap, zero mid-loop cut
-(copy-fill draws k from negative so the right-entering copy is never
-missing). Long titles that need N>30 fall back to N=30 with bigger STEP
-(seamless but fast); the count printout says so honestly.
+Scroll: dynamic frame count. L=tw+GAPp (text + blank gap). The device
+plays at a fixed rate, so speed = STEP px/frame; to slow the marquee we
+use as many frames as the hardware allows (MAXN=128, verified) with the
+smallest integer STEP, N=ceil((tw+MIN_GAP)/STEP). N*STEP == L exactly, so
+hypothetical frameN renders byte-identical to frame0: zero loop snap,
+zero mid-loop cut (copy-fill draws k from negative so the right-entering
+copy is never missing).
 """
 import math
 import subprocess
@@ -23,9 +23,8 @@ import sys
 from datetime import datetime
 
 W, H = 128, 64
-MAXN = 30  # hardware slot count (CONFIG nframes, ScreenFrame.json slots)
+MAXN = 128  # hardware frame cap (verified: 128 frames play, 129+ wraps; CONFIG nframes byte)
 MIN_GAP = 32
-STEPS = (3, 4, 5, 6, 8)  # smooth first
 STATIC_N = 4
 X0 = 4  # small left margin for scroll start
 NP = r"D:\Project\keyboard\timeless82\nowplaying\bin\Release\net8.0-windows10.0.22621.0\nowplaying.exe"
@@ -45,20 +44,20 @@ def textw(d, s, f):
 
 
 def pick_plan(tw):
-    """Count frames for a seamless loop at smooth speed.
+    """Frame count for the slowest seamless loop.
 
-    Returns (n, step, gap): n*step == tw+gap exactly (hypothetical
-    frameN renders byte-identical to frame0). Smallest smooth STEP
-    whose N fits hardware; else (30, big_step, gap) fallback.
+    The device plays frames at a fixed rate, so speed == STEP px/frame;
+    the only way to slow down is more frames at a smaller STEP. Use as
+    many frames as the hardware cap allows: STEP = ceil((tw+MIN_GAP)/MAXN),
+    then N = ceil((tw+MIN_GAP)/STEP) (<= MAXN). Returns (n, step, gap) with
+    n*step == tw+gap exactly, so hypothetical frameN renders byte-identical
+    to frame0 (zero loop snap). gap lands in [MIN_GAP, MIN_GAP+step).
     """
     if tw <= W - 4:
         return STATIC_N, 0, 0  # static: no motion
-    for s in STEPS:
-        n = math.ceil((tw + MIN_GAP) / s)
-        if n <= MAXN:
-            return n, s, n * s - tw
-    s = math.ceil((tw + MIN_GAP) / MAXN)
-    return MAXN, s, MAXN * s - tw
+    step = max(1, math.ceil((tw + MIN_GAP) / MAXN))
+    n = math.ceil((tw + MIN_GAP) / step)
+    return n, step, n * step - tw
 
 
 def new():

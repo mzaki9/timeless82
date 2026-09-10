@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write art into the stock app's ScreenFrame.json (slots 0..N-1, N<=30).
+"""Write art into the stock app's ScreenFrame.json (slots 0..N-1, N<=120).
 
 The stock app itself then uploads with its own correct framing AND its own
 lighting bytes, so LEDs/Fn are never touched by us. Zero device writes here.
@@ -11,7 +11,7 @@ instead packs N frames to 1024B each (column-major MSB-top) and uploads
 via timeless82.exe oledN. The two paths diverge by design: JSON=N
 unpacked, HID=N packed.
 
-Usage: setframes.py art0.png [art1.png ... artN.png] (N<=30)
+Usage: setframes.py art0.png [art1.png ... artN.png] (N<=120)
 
 Flow:
   1. (keyboard: stock Apply once so LEDs+screen are good, then close app)
@@ -26,7 +26,8 @@ import sys
 
 W, H = 128, 64
 SLOT = W * H
-NSLOTS = 30
+MAXSLOTS = 120
+BLANK = [0] * SLOT
 JSON = os.path.expandvars(
     r"%LOCALAPPDATA%\NoirTimeless82\keyboard\ScreenFrame.json")
 BAK = JSON + ".bak"
@@ -43,7 +44,7 @@ def load_art(path):
 
 def main(argv):
     arts = argv[1:]
-    if not arts or len(arts) > NSLOTS or any(a.startswith("-") for a in arts):
+    if not arts or len(arts) > MAXSLOTS or any(a.startswith("-") for a in arts):
         print(__doc__)
         return 2
     with open(JSON, encoding="utf-8-sig") as f:
@@ -61,11 +62,11 @@ def main(argv):
     for i, a in enumerate(arts):
         frames[i] = load_art(a)
         print(f"slot {i}: {a}")
-    for i in range(len(arts), NSLOTS):
+    for i in range(len(arts), len(frames)):
         frames[i] = list(frames[i])  # keep existing
     with open(JSON, "w", encoding="utf-8") as f:
         json.dump(data, f)
-    print(f"wrote {JSON} ({nslots} slots kept)")
+    print(f"wrote {JSON} ({len(frames)} slots kept)")
     print("next: open stock app -> screen page -> Apply, check screen 5")
     return 0
 
