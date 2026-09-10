@@ -46,19 +46,21 @@ def textw(d, s, f):
     return r - l
 
 
-def pick_plan(tw):
-    """Frame count for the slowest seamless loop.
+def pick_plan(tw, maxn=MAXN):
+    """Frame count for the slowest seamless loop within a frame budget.
 
     The device plays frames at a fixed rate, so speed == STEP px/frame;
-    the only way to slow down is more frames at a smaller STEP. Use as
-    many frames as the hardware cap allows: STEP = ceil((tw+MIN_GAP)/MAXN),
-    then N = ceil((tw+MIN_GAP)/STEP) (<= MAXN). Returns (n, step, gap) with
-    n*step == tw+gap exactly, so hypothetical frameN renders byte-identical
-    to frame0 (zero loop snap). gap lands in [MIN_GAP, MIN_GAP+step).
+    the only way to slow down is more frames at a smaller STEP. But the
+    upload (and its keyboard freeze) is ~65ms per frame, so maxn caps the
+    cost: STEP = ceil((tw+MIN_GAP)/maxn), then N = ceil((tw+MIN_GAP)/STEP)
+    (<= maxn). Returns (n, step, gap) with n*step == tw+gap exactly, so
+    hypothetical frameN renders byte-identical to frame0 (zero loop snap).
+    gap lands in [MIN_GAP, MIN_GAP+step).
     """
     if tw <= W - 4:
         return STATIC_N, 0, 0  # static: no motion
-    step = max(1, math.ceil((tw + MIN_GAP) / MAXN))
+    maxn = max(1, min(maxn, MAXN))
+    step = max(1, math.ceil((tw + MIN_GAP) / maxn))
     n = math.ceil((tw + MIN_GAP) / step)
     return n, step, n * step - tw
 
@@ -101,14 +103,14 @@ def fit_text(d, s, f, maxw):
     return (s + "...") if s else ""
 
 
-def render_track(title, artist, playing):
+def render_track(title, artist, playing, maxn=MAXN):
     tmp_im, tmp_d = new()
     fl = font(21)
     fi = font(11)
     fa = font(12)
     tw = textw(tmp_d, title, fl)
     date = datetime.now().strftime("%a %d %b").upper()
-    n, step, gap_used = pick_plan(tw)
+    n, step, gap_used = pick_plan(tw, maxn)
     L = tw + gap_used
     frames = []
     for i in range(n):
@@ -133,7 +135,7 @@ def render_track(title, artist, playing):
     return frames, title, step, gap_used, n
 
 
-def get_frames():
+def get_frames(maxn=MAXN):
     """Poll media + render. Returns (bw_frames, meta dict). Import-safe."""
     try:
         out = subprocess.run([NP], capture_output=True, text=True,
@@ -148,7 +150,7 @@ def get_frames():
             frames, what, step, gap_used, n = render_idle()
         else:
             frames, what, step, gap_used, n = render_track(
-                title or "?", artist or "?", status == "Playing")
+                title or "?", artist or "?", status == "Playing", maxn)
     bw = [im.point(lambda v: 255 if v >= 128 else 0) for im in frames]  # pure B/W
     meta = {"what": what, "n": n, "step": step, "gap": gap_used}
     return bw, meta

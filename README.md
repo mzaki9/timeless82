@@ -126,10 +126,13 @@ running < 3 MB. Python is not involved.
   short/idle = STATIC_N=4 identical frames) -> pack -> `oledN`.
 - Frame count dynamic via `pick_plan` (computed on the **title** width):
   STATIC_N=4 when short/idle (step 0);
-  else use as many frames as the hardware cap (MAXN=128) allows, with the
-  smallest integer STEP = ceil((tw+MIN_GAP)/128) -> slowest possible
-  marquee, N*STEP==L exact seam (frameN byte-identical frame0); stale PNGs
-  >= N deleted. Speed is dialed further with the CONFIG interval byte.
+  else `--maxn` (default 64, hard cap MAXN=128) sets a frame budget, with the
+  smallest integer STEP = ceil((tw+MIN_GAP)/maxn) -> N*STEP==L exact seam
+  (frameN byte-identical frame0); stale PNGs >= N deleted. Upload time (and
+  keyboard freeze) is ~65ms/frame, so maxn trades scroll speed vs freeze:
+  long title -> 32 frames ~2.1s, 64 ~4.1s, 128 ~8.2s. The CONFIG interval
+  byte is clamped by this firmware (60000ms still plays fast), so frames are
+  the only real speed lever.
 - JSON path (default, no HID): `nowlive.py` re-renders on track/state
   change (no per-minute refresh anymore), `setframes.py` writes N PNGs into
   slots 0..N-1 (grows the slot
@@ -144,15 +147,23 @@ running < 3 MB. Python is not involved.
   [43..44]=frame interval u16 LE ms`.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
   render+pack only, `--interval MS` frame time default 1000, `--disp I`
-  default 4); e.g. slower: `--interval 2000`; faster: `--interval 300`.
+  default 4, `--maxn N` frame budget 1..128 default 64); slower scroll but
+  longer freeze: `--maxn 128`; snappier: `--maxn 32`.
 - Keyboard lock during upload: the board stalls its key scanning while it
-  ingests IMAGE data (~7s for ~107 frames; firmware-paced, and the per-chunk
+  ingests IMAGE data (~65ms/frame; firmware-paced, and the per-chunk
   ACK wait is already optimal — fire-and-forget is *slower*, ~20s, because
-  the device IN buffer backs up). So the loop does not fight it: it gates
-  the direct upload on user idle (`--idle-ms`, default 1500; set 0 to
-  disable). When a track changes while you are typing it prints
-  `deferred (input Nms ago)` and uploads the moment you pause. `--once`
-  uploads immediately.
+  the device IN buffer backs up). Opening the handle alone does not freeze
+  keys, and pausing between IMAGE reports does not help — the board holds
+  its key matrix off for the whole session (INIT..COMMIT). So the loop does
+  not fight it, it just uploads less and only at rest:
+  (a) `--maxn` caps frames; (b) 2s debounce collapses rapid track-skipping
+  into a single upload; (c) `--idle-ms` (default 1500; 0 disables) defers
+  the direct upload until no keyboard/mouse input. When a track changes
+  while you are typing it prints `deferred (input Nms ago)` and uploads the
+  moment you pause. `--once` uploads immediately.
+- Diagnostic: `timeless82.exe hold [MODE=open|wo|rw|init] [MS]` opens the
+  display handle (read-only / write-only / rw / +INIT) and idles, to prove
+  what does and does not block the keyboard.
 - Safety: wired `320F:5055` only, `FF1C:0092`; never `FFEF`/MI_02, never
   `0xBE FC`/`0xBE EE`.
 - Check screen 5 (slots 0-3 animation); revert via stock app Apply.

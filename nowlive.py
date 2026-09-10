@@ -13,13 +13,15 @@ timeless82.exe oledN (screen 5 = disp 4, interval slows the scroll).
 --dry renders (+packs in direct mode) without uploading or touching JSON.
 --interval MS sets frame interval (default 1000; larger = slower).
 --disp I sets screen index (default 4 = screen 5).
+--maxn N caps frames (1..128, default 128): lower = smaller upload, shorter
+keyboard freeze (~65ms/frame), but faster scroll. Track changes are debounced
+(2s settle) so rapid skipping = one upload, not many.
 The board's firmware stalls keyboard scanning while it ingests a display
-upload (~7s for ~107 frames, firmware-paced), so a running loop uploads
-only when the user is idle: it waits for no keyboard/mouse input for
---idle-ms (default 1500) before starting, and defers otherwise. Track
-changes are picked up as soon as you pause. --once uploads immediately.
+upload (~65ms per frame), so a running loop uploads only when the user is
+idle: it waits for no keyboard/mouse input for --idle-ms (default 1500)
+before starting, and defers otherwise. --once uploads immediately.
 
-Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [--idle-ms N] [interval_sec=5]
+Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [interval_sec=5]
 """
 import subprocess
 import sys
@@ -30,10 +32,12 @@ NP = HERE + r"\nowplaying\bin\Release\net8.0-windows10.0.22621.0\nowplaying.exe"
 EXE = HERE + r"\timeless82.exe"
 BIN = HERE + r"\npN.bin"
 W, H = 128, 64
-MAXN = 128
+MAXN = 128  # hardware playback cap (verified: 128 plays, 129+ wraps)
+MAXN_DEFAULT = 64  # default frame budget: ~half the freeze, still smooth
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
 INTERVAL = 1000  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
 IDLE_MS = 1500  # only start an upload after this long with no keyboard/mouse
+DEBOUNCE = 2.0  # settle time before uploading (collapses rapid track skips)
 
 sys.path.insert(0, HERE)
 import nowshow
@@ -85,10 +89,10 @@ def pack_frames(frames):
     return bytes(out)
 
 
-def refresh_json():
+def refresh_json(maxn=MAXN):
     t0 = time.time()
     try:
-        frames, meta = nowshow.get_frames()
+        frames, meta = nowshow.get_frames(maxn)
         import os
         for i, im in enumerate(frames):
             im.save(HERE + rf"\anim_np_{i}.png")
@@ -116,11 +120,11 @@ def refresh_json():
     return True
 
 
-def refresh_direct(dry=False, disp=DISP, interval=INTERVAL):
+def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN):
     """Render in-process -> pack N frames -> optional oledN upload."""
     t0 = time.time()
     try:
-        frames, meta = nowshow.get_frames()
+        frames, meta = nowshow.get_frames(maxn)
         n = meta["n"]
         import os
         for i, im in enumerate(frames):
@@ -155,10 +159,10 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL):
     return True
 
 
-def refresh_dry_json():
+def refresh_dry_json(maxn=MAXN):
     """Render only (no JSON write, no upload)."""
     try:
-        frames, meta = nowshow.get_frames()
+        frames, meta = nowshow.get_frames(maxn)
         for i, im in enumerate(frames):
             im.save(HERE + rf"\anim_np_{i}.png")
     except Exception as e:
@@ -172,7 +176,7 @@ def main(argv):
     once = "--once" in argv
     direct = "--direct" in argv
     dry = "--dry" in argv
-    disp, interval, idle_gate = DISP, INTERVAL, IDLE_MS
+    disp, interval, idle_gate, maxn = DISP, INTERVAL, IDLE_MS, MAXN_DEFAULT
     poll = 5
     args = list(argv[1:])
     i = 0
@@ -185,31 +189,48 @@ def main(argv):
             interval = min(max(int(nxt), 1), 60000); i += 2; continue
         if a in ("--idle-ms", "--idle") and nxt.isdigit():
             idle_gate = min(max(int(nxt), 0), 600000); i += 2; continue
+        if a in ("--maxn", "--frames") and nxt.isdigit():
+            maxn = min(max(int(nxt), 1), MAXN); i += 2; continue
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
             interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
         elif a.startswith("--idle-ms=") and a.split("=", 1)[1].isdigit():
             idle_gate = min(max(int(a.split("=", 1)[1]), 0), 600000)
+        elif a.startswith("--maxn=") and a.split("=", 1)[1].isdigit():
+            maxn = min(max(int(a.split("=", 1)[1]), 1), MAXN)
         elif a.isdigit():
             poll = min(max(int(a), 1), 300)  # bare positional = poll seconds
         i += 1
     # The device is unusable while an upload is in flight, so only gate the
     # real direct upload in loop mode. --once and JSON/dry paths upload now.
     gate_upload = direct and not dry and not once and idle_gate > 0
+    debounce = 0.0 if once else DEBOUNCE
     print(f"poll every {poll}s, --once={once} --direct={direct} "
-          f"--dry={dry} disp={disp} interval={interval} "
+          f"--dry={dry} disp={disp} interval={interval} maxn={maxn} "
           f"idle_gate={'on' if gate_upload else 'off'}"
           + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
     last = None
-    refresh = (lambda: refresh_direct(dry, disp, interval)) if direct else \
-              (refresh_dry_json if dry else refresh_json)
+    pending = None
+    pending_at = 0.0
+    refresh = (lambda: refresh_direct(dry, disp, interval, maxn)) if direct else \
+              (lambda: refresh_dry_json(maxn)) if dry else \
+              (lambda: refresh_json(maxn))
     while True:
         try:
             cur = current()
+            if cur == "ERR":
+                time.sleep(poll)
+                if once:
+                    return 0
+                continue
             # No clock in the frames, so they stay valid over time: only a
-            # track/state change (cur != last) needs a re-upload.
-            tick = (cur != last)
-            if tick:
-                if cur != "ERR":
+            # track/state change (cur != last) needs a re-upload. Debounce:
+            # wait for the state to settle so rapid track-skipping collapses
+            # into a single upload instead of one freeze per step.
+            if cur != last:
+                if cur != pending:
+                    pending = cur
+                    pending_at = time.time()
+                if (time.time() - pending_at) >= debounce:
                     if gate_upload and idle_ms() < idle_gate:
                         print(f"[{time.strftime('%H:%M:%S')}] deferred "
                               f"(input {idle_ms()}ms ago, need {idle_gate}ms)",
@@ -219,11 +240,7 @@ def main(argv):
                               flush=True)
                         if refresh():
                             last = cur
-                else:
-                    time.sleep(poll)
-                    if once:
-                        return 0
-                    continue
+                            pending = None
         except Exception:
             import traceback
             traceback.print_exc()

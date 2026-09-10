@@ -154,7 +154,8 @@ static int cmd_caps(void) {
 // Open first 320F:5055 interface matching usage page/usage, with write access.
 // Returns INVALID_HANDLE_VALUE on failure. Never opens FFEF (OTA) for writes:
 // callers must pass explicit non-OTA usage; this helper refuses FFEF outright.
-static HANDLE open_hid(USHORT wantUp, USHORT wantU, char *pathOut, int pathSz) {
+static HANDLE open_hid_acc(USHORT wantUp, USHORT wantU, DWORD access,
+                           char *pathOut, int pathSz) {
     if (wantUp == 0xFFEF) { printf("REFUSED: FFEF is the OTA channel\n"); return INVALID_HANDLE_VALUE; }
     GUID guid;
     HidD_GetHidGuid(&guid);
@@ -176,7 +177,7 @@ static HANDLE open_hid(USHORT wantUp, USHORT wantU, char *pathOut, int pathSz) {
         det->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
         HANDLE h = INVALID_HANDLE_VALUE;
         if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, det, need, NULL, NULL)) {
-            h = CreateFileA(det->DevicePath, GENERIC_READ | GENERIC_WRITE,
+            h = CreateFileA(det->DevicePath, access,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
             if (h != INVALID_HANDLE_VALUE) {
@@ -216,6 +217,10 @@ static HANDLE open_hid(USHORT wantUp, USHORT wantU, char *pathOut, int pathSz) {
     return found;
 }
 
+static HANDLE open_hid(USHORT wantUp, USHORT wantU, char *pathOut, int pathSz) {
+    return open_hid_acc(wantUp, wantU, GENERIC_READ | GENERIC_WRITE, pathOut, pathSz);
+}
+
 static void hexdump(const unsigned char *b, int n) {
     for (int i = 0; i < n; i++) {
         printf("%02X%c", b[i], (i + 1) % 16 ? ' ' : '\n');
@@ -246,6 +251,32 @@ static int read_timeout(HANDLE h, unsigned char *buf, int len, int ms) {
     }
     CloseHandle(ov.hEvent);
     return ret;
+}
+
+// Diagnostic: hold the FF1C display handle open, with a mode, to find what
+// actually blocks the keyboard. No pixels sent.
+// Usage: hold [MODE=open|rw|wo|init] [MS=5000]
+//   open = GENERIC_READ only, hold
+//   wo   = GENERIC_WRITE only, hold
+//   rw   = GENERIC_READ|WRITE, hold
+//   init = rw, send one INIT, hold
+static int ff1c_sendA(HANDLE h, unsigned char cmd, unsigned char len,
+                      unsigned pos, const unsigned char *data, int verbose);
+static int cmd_hold(int argc, char **argv) {
+    const char *mode = argc >= 3 ? argv[2] : "open";
+    int ms = argc >= 4 ? atoi(argv[3]) : 5000;
+    DWORD access = GENERIC_READ | GENERIC_WRITE;
+    if (!strcmp(mode, "open")) access = GENERIC_READ;
+    else if (!strcmp(mode, "wo")) access = GENERIC_WRITE;
+    char path[512] = {0};
+    HANDLE h = open_hid_acc(0xFF1C, 0x92, access, path, sizeof(path));
+    if (h == INVALID_HANDLE_VALUE) { printf("ERR: FF1C:0092 open failed\n"); return 1; }
+    if (!strcmp(mode, "init")) { ff1c_sendA(h, 0x01, 0, 0, NULL, 1); printf("sent INIT\n"); }
+    printf("holding mode=%s %d ms (type now)\n", mode, ms); fflush(stdout);
+    Sleep(ms);
+    CloseHandle(h);
+    printf("closed\n");
+    return 0;
 }
 
 static int cmd_via(void) {
@@ -574,8 +605,11 @@ static int cmd_oled(int argc, char **argv) {
 // byte[c*8+pg] bit 7-k = pixel (pg*8+k, c).
 // 64B WriteFile reports: [0]=0x04 [1..2]=checksum u16LE sum[3..63]
 // [3]=cmd [4]=len [5..7]=pos LE24 [8..63]=payload.
-// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000].
+// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000] [GAP_EVERY=0] [GAP_MS=0].
 // N = 1..255 (128 is the verified hardware playback cap).
+// GAP_EVERY/GAP_MS: sleep GAP_MS every GAP_EVERY IMAGE chunks, so the board's
+// MCU can service its keyboard between display reports (total upload longer,
+// but individual key freezes shorter). 0 = never.
 // Sequence: INIT(0x01)x1, IMAGE(0x21, 56B chunks, pos 0..N*1024-1),
 // COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
 // CONFIG layout (offsets into the 56B payload = config buffer from byte 0;
@@ -593,12 +627,16 @@ static int cmd_oled(int argc, char **argv) {
 // never sends 0xBE 0xFC / 0xBE 0xEE.
 static int cmd_oledN(int argc, char **argv) {
     if (argc < 4) {
-        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000]\n");
+        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000] [GAP_EVERY=0] [GAP_MS=0]\n");
         return 2;
     }
     int nframes = atoi(argv[3]);
     int dispidx = argc >= 5 ? atoi(argv[4]) : 4;
     int interval = argc >= 6 ? atoi(argv[5]) : 1000;
+    int gap_every = argc >= 7 ? atoi(argv[6]) : 0;  // 0 = no breathing gaps
+    int gap_ms = argc >= 8 ? atoi(argv[7]) : 0;
+    if (gap_every < 0) gap_every = 0;
+    if (gap_ms < 0) gap_ms = 0;
     if (nframes < 1 || nframes > 255) { printf("bad NFRAMES (1..255)\n"); return 2; }
     if (dispidx < 0 || dispidx > 5) { printf("bad DISP_IDX (0..5, 4=screen 5)\n"); return 2; }
     if (interval < 1 || interval > 60000) { printf("bad INTERVAL (1..60000 ms)\n"); return 2; }
@@ -621,13 +659,17 @@ static int cmd_oledN(int argc, char **argv) {
     }
     printf("INIT ack\n");
     long sent = 0, pos = 0;
-    int fail = 0;
+    int fail = 0, ci = 0;
     while (sent < want) {
         int chunk = (int)((want - sent > 56) ? 56 : (want - sent));
         if (!ff1c_sendA(h, 0x21, (unsigned char)chunk, (unsigned)pos, pix + sent, 0)) {
             printf("IMAGE fail at pos %ld\n", pos); fail = 1; break;
         }
-        sent += chunk; pos += chunk;
+        sent += chunk; pos += chunk; ci++;
+        // Optional breathing gap: sleep every gap_every chunks so the MCU can
+        // service its keyboard matrix between display reports. Trades total
+        // upload time for shorter individual freezes.
+        if (gap_every > 0 && (ci % gap_every) == 0) Sleep((DWORD)gap_ms);
         if ((pos / 56) % 25 == 0) printf("... %ld/%ld\n", sent, want);
     }
     if (fail) { CloseHandle(h); free(pix); return 1; }
@@ -900,7 +942,8 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "oled30")) return cmd_oledN(argc, argv); // alias
     if (!strcmp(argv[1], "oledN")) return cmd_oledN(argc, argv);
     if (!strcmp(argv[1], "oled2")) return cmd_oled2(argc, argv);
+    if (!strcmp(argv[1], "hold")) return cmd_hold(argc, argv);
     if (!strcmp(argv[1], "sweep17")) return cmd_sweep17(argc, argv);
-    printf("unknown cmd '%s'. usage: timeless82.exe <list|caps|via|ping|readcfg|scan|q|watch|cfgwrite|cfg|oled|oledN|oled2|sweep17>\n", argv[1]);
+    printf("unknown cmd '%s'. usage: timeless82.exe <list|caps|via|ping|readcfg|scan|q|watch|cfgwrite|cfg|oled|oledN|oled2|sweep17|hold>\n", argv[1]);
     return 2;
 }
