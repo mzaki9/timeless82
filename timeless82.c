@@ -638,7 +638,7 @@ static int cmd_oledN(int argc, char **argv) {
     if (gap_every < 0) gap_every = 0;
     if (gap_ms < 0) gap_ms = 0;
     if (nframes < 1 || nframes > 255) { printf("bad NFRAMES (1..255)\n"); return 2; }
-    if (dispidx < 0 || dispidx > 5) { printf("bad DISP_IDX (0..5, 4=screen 5)\n"); return 2; }
+    if (dispidx < 0 || dispidx > 5) { printf("bad DISP_IDX (0..5, 4=screen 5; device has 6 fixed screens)\n"); return 2; }
     if (interval < 1 || interval > 60000) { printf("bad INTERVAL (1..60000 ms)\n"); return 2; }
     FILE *f = fopen(argv[2], "rb");
     if (!f) { printf("cannot open %s\n", argv[2]); return 1; }
