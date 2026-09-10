@@ -568,21 +568,15 @@ static int cmd_oled(int argc, char **argv) {
     return fail ? 1 : 0;
 }
 
-// OLED 30-frame upload, Frida-proven wire format (hidfrida.log).
-// FILE = 30720 bytes = 30 concatenated 1024B frames, no stock app needed.
+// OLED frame upload, Frida-proven wire format (hidfrida.log).
+// FILE = N concatenated 1024B frames, no stock app needed.
 // Pixel encoding: 1024B/frame column-major 1-bit MSB-top:
 // byte[c*8+pg] bit 7-k = pixel (pg*8+k, c).
 // 64B WriteFile reports: [0]=0x04 [1..2]=checksum u16LE sum[3..63]
 // [3]=cmd [4]=len [5..7]=pos LE24 [8..63]=payload.
-// Sequence: INIT(0x01)x1, IMAGE(0x21, 56B chunks, pos 0..30719),
-// COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
-// CONFIG = 56 zero bytes except payload[22]=0x03, payload[33]=disp_idx
-// (abs41), payload[34]=30 nframes fixed (abs42=0x1E),
-// payload[35..37]=39 55 18 interval bytes as captured (abs43..45).
-// Only FF1C:0092 on wired 320F:5055 (open_hid refuses FFEF);
-// never sends 0xBE 0xFC / 0xBE 0xEE.
-// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]. Dynamic count 1..255:
-// INIT(0x01)x1, IMAGE(0x21, 56B chunks, pos 0..N*1024-1),
+// Usage: oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000].
+// N = 1..255 (128 is the verified hardware playback cap).
+// Sequence: INIT(0x01)x1, IMAGE(0x21, 56B chunks, pos 0..N*1024-1),
 // COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
 // CONFIG layout (offsets into the 56B payload = config buffer from byte 0;
 // gmk87-c-spec 240x135 sibling, confirmed by capture):
@@ -591,16 +585,20 @@ static int cmd_oled(int argc, char **argv) {
 //   [43..44]=frame interval u16 LE MILLISECONDS (capture 00 00;
 //   larger = slower; old oled used 100ms). Earlier oledN wrongly wrote the
 //   interval into the clock byte [35], so the knob had no visible effect.
+// The board stalls its keyboard scanning while ingesting IMAGE data, and
+// the transfer is firmware-paced (~7s for 107 frames; per-chunk ACK wait is
+// optimal, fire-and-forget is slower because the IN buffer backs up). So
+// nowlive.py gates uploads on user idle instead of trying to go faster.
 // Only FF1C:0092 on wired 320F:5055 (open_hid refuses FFEF);
 // never sends 0xBE 0xFC / 0xBE 0xEE.
 static int cmd_oledN(int argc, char **argv) {
     if (argc < 4) {
-        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]\n");
+        printf("usage: timeless82.exe oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000]\n");
         return 2;
     }
     int nframes = atoi(argv[3]);
     int dispidx = argc >= 5 ? atoi(argv[4]) : 4;
-    int interval = argc >= 6 ? atoi(argv[5]) : 150;
+    int interval = argc >= 6 ? atoi(argv[5]) : 1000;
     if (nframes < 1 || nframes > 255) { printf("bad NFRAMES (1..255)\n"); return 2; }
     if (dispidx < 0 || dispidx > 5) { printf("bad DISP_IDX (0..5, 4=screen 5)\n"); return 2; }
     if (interval < 1 || interval > 60000) { printf("bad INTERVAL (1..60000 ms)\n"); return 2; }

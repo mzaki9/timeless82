@@ -140,6 +140,14 @@ running < 3 MB. Python is not involved.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
   render+pack only, `--interval MS` frame time default 1000, `--disp I`
   default 4); e.g. slower: `--interval 2000`; faster: `--interval 300`.
+- Keyboard lock during upload: the board stalls its key scanning while it
+  ingests IMAGE data (~7s for ~107 frames; firmware-paced, and the per-chunk
+  ACK wait is already optimal — fire-and-forget is *slower*, ~20s, because
+  the device IN buffer backs up). So the loop does not fight it: it gates
+  the direct upload on user idle (`--idle-ms`, default 1500; set 0 to
+  disable). When a track changes while you are typing it prints
+  `deferred (input Nms ago)` and uploads the moment you pause. `--once`
+  uploads immediately.
 - Safety: wired `320F:5055` only, `FF1C:0092`; never `FFEF`/MI_02, never
   `0xBE FC`/`0xBE EE`.
 - Check screen 5 (slots 0-3 animation); revert via stock app Apply.

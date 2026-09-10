@@ -13,8 +13,13 @@ timeless82.exe oledN (screen 5 = disp 4, interval slows the scroll).
 --dry renders (+packs in direct mode) without uploading or touching JSON.
 --interval MS sets frame interval (default 1000; larger = slower).
 --disp I sets screen index (default 4 = screen 5).
+The board's firmware stalls keyboard scanning while it ingests a display
+upload (~7s for ~107 frames, firmware-paced), so a running loop uploads
+only when the user is idle: it waits for no keyboard/mouse input for
+--idle-ms (default 1500) before starting, and defers otherwise. Track
+changes are picked up as soon as you pause. --once uploads immediately.
 
-Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [interval_sec=5]
+Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [--idle-ms N] [interval_sec=5]
 """
 import subprocess
 import sys
@@ -28,9 +33,24 @@ W, H = 128, 64
 MAXN = 128
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
 INTERVAL = 1000  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
+IDLE_MS = 1500  # only start an upload after this long with no keyboard/mouse
 
 sys.path.insert(0, HERE)
 import nowshow
+
+
+def idle_ms():
+    """Milliseconds since the last keyboard/mouse input in this session."""
+    import ctypes
+
+    class LII(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+    li = LII()
+    li.cbSize = ctypes.sizeof(li)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li)):
+        return 1 << 30
+    return (ctypes.windll.kernel32.GetTickCount() - li.dwTime) & 0x7FFFFFFF
 
 
 def current():
@@ -152,21 +172,33 @@ def main(argv):
     once = "--once" in argv
     direct = "--direct" in argv
     dry = "--dry" in argv
-    disp, interval = DISP, INTERVAL
+    disp, interval, idle_gate = DISP, INTERVAL, IDLE_MS
+    poll = 5
     args = list(argv[1:])
-    for i, a in enumerate(args):
-        if a == "--disp" and i + 1 < len(args) and args[i + 1].isdigit():
-            disp = min(max(int(args[i + 1]), 0), 5)
-        if a in ("--interval", "--speed") and i + 1 < len(args) and args[i + 1].isdigit():
-            interval = min(max(int(args[i + 1]), 1), 60000)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a == "--disp" and nxt.isdigit():
+            disp = min(max(int(nxt), 0), 5); i += 2; continue
+        if a in ("--interval", "--speed") and nxt.isdigit():
+            interval = min(max(int(nxt), 1), 60000); i += 2; continue
+        if a in ("--idle-ms", "--idle") and nxt.isdigit():
+            idle_gate = min(max(int(nxt), 0), 600000); i += 2; continue
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
             interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
-    poll = 5
-    for a in argv[1:]:
-        if a.isdigit():
-            poll = min(max(int(a), 1), 300)
+        elif a.startswith("--idle-ms=") and a.split("=", 1)[1].isdigit():
+            idle_gate = min(max(int(a.split("=", 1)[1]), 0), 600000)
+        elif a.isdigit():
+            poll = min(max(int(a), 1), 300)  # bare positional = poll seconds
+        i += 1
+    # The device is unusable while an upload is in flight, so only gate the
+    # real direct upload in loop mode. --once and JSON/dry paths upload now.
+    gate_upload = direct and not dry and not once and idle_gate > 0
     print(f"poll every {poll}s, --once={once} --direct={direct} "
-          f"--dry={dry} disp={disp} interval={interval}", flush=True)
+          f"--dry={dry} disp={disp} interval={interval} "
+          f"idle_gate={'on' if gate_upload else 'off'}"
+          + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
     last = None
     last_tick_min = None
     refresh = (lambda: refresh_direct(dry, disp, interval)) if direct else \
@@ -181,11 +213,16 @@ def main(argv):
             # clock at upload time instead of re-rendering all frames.
             if tick:
                 if cur != "ERR":
-                    print(f"[{time.strftime('%H:%M:%S')}] change: {cur[:80]}",
-                          flush=True)
-                    if refresh():
-                        last = cur
-                        last_tick_min = now_min
+                    if gate_upload and idle_ms() < idle_gate:
+                        print(f"[{time.strftime('%H:%M:%S')}] deferred "
+                              f"(input {idle_ms()}ms ago, need {idle_gate}ms)",
+                              flush=True)
+                    else:
+                        print(f"[{time.strftime('%H:%M:%S')}] change: {cur[:80]}",
+                              flush=True)
+                        if refresh():
+                            last = cur
+                            last_tick_min = now_min
                 else:
                     time.sleep(poll)
                     if once:
