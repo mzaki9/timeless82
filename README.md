@@ -101,10 +101,11 @@ running < 3 MB. Python is not involved.
 - `oled2 FILE [OFF=0] [N=39]`: replicates S1+S2 (+more for larger N).
   64B report-4 path = lighting/display-select only.
 
-## OLED 30-frame upload (Frida-proven, no stock app)
+## OLED frame upload (Frida-proven, no stock app)
 
-- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=150]`: FILE = N concatenated
-  1024B frames (N=1..30), column-major 1-bit MSB-top
+- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000]`: FILE = N concatenated
+  1024B frames (N=1..128; 128 = verified hardware cap, higher wraps),
+  column-major 1-bit MSB-top
   (byte[c*8+pg] bit 7-k = pixel (pg*8+k, c)). (`oled30` = alias.)
 - Sequence: INIT(0x01), IMAGE(0x21, 56B chunks pos 0..N*1024-1),
   COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
@@ -120,14 +121,15 @@ running < 3 MB. Python is not involved.
   -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`: status+clock /
   scrolling "Title - Artist" / date; idle/short = STATIC_N=4 identical
   frames) -> pack -> `oledN`.
-- Frame count dynamic via `pick_plan`: STATIC_N=4 when short/idle (step 0),
-  else smallest smooth STEP in 3/4/5/6/8 whose N fits 30, else N=30 fast
-  fallback with bigger STEP. N*STEP==L exact seam (frameN byte-identical
-  frame0); stale PNGs >= N deleted.
+- Frame count dynamic via `pick_plan`: STATIC_N=4 when short/idle (step 0);
+  else use as many frames as the hardware cap (MAXN=128) allows, with the
+  smallest integer STEP = ceil((tw+MIN_GAP)/128) -> slowest possible
+  marquee, N*STEP==L exact seam (frameN byte-identical frame0); stale PNGs
+  >= N deleted. Speed is dialed further with the CONFIG interval byte.
 - JSON path (default, no HID): `nowlive.py` re-renders on track/state
-  change, `setframes.py` writes N PNGs into slots 0..N-1 (30 slots kept).
-  Direct path: `nowlive.py --direct` packs N frames -> `npN.bin` ->
-  `oledN FILE NFRAMES`.
+  change, `setframes.py` writes N PNGs into slots 0..N-1 (grows the slot
+  array up to 120 as needed). Direct path: `nowlive.py --direct` packs N
+  frames -> `npN.bin` -> `oledN FILE NFRAMES`.
 - Wire: 64B Layout-A `[0]=0x04 [1..2]=checksum u16LE sum[3..63] [3]=cmd
   [4]=len [5..7]=pos LE24 [8..63]=payload`; INIT(0x01), IMAGE(0x21, 56B
   chunks pos 0..N*1024-1), COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT.
@@ -136,8 +138,8 @@ running < 3 MB. Python is not involved.
   `[22]=0x03, [33]=disp_idx(4=screen 5), [34]=N, [35..37]=BCD clock,
   [43..44]=frame interval u16 LE ms`.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
-  render+pack only, `--interval MS` frame time default 150, `--disp I`
-  default 4); e.g. slower: `--interval 300`; faster: `--interval 80`.
+  render+pack only, `--interval MS` frame time default 1000, `--disp I`
+  default 4); e.g. slower: `--interval 2000`; faster: `--interval 300`.
 - Safety: wired `320F:5055` only, `FF1C:0092`; never `FFEF`/MI_02, never
   `0xBE FC`/`0xBE EE`.
 - Check screen 5 (slots 0-3 animation); revert via stock app Apply.
