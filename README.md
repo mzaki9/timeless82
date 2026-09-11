@@ -189,6 +189,60 @@ taskkill /F /PID $pid
 `Program.cs` also caps the whole call at 4 s and prints `NO-SESSION` on timeout
 (plus per-stage timing on stderr), so a wedge can never stall `nowlive.py`.
 
+## Launch at login + tray on/off menu (tray.ps1)
+
+WinForms `NotifyIcon` (no new deps, no admin, no build). Tray menu:
+
+- **Enabled** — starts/stops `py -3 nowlive.py` (child tree killed with
+  `taskkill /T`; pid tracked in `nowlive.pid`). Output -> `nowlive.log`
+  (+ `nowlive.err.log`).
+- **Start with Windows** — creates/removes
+  `%APPDATA%\...\Startup\timeless82-tray.lnk` (hidden PowerShell, window
+  style 7).
+- **Open log**, **Exit** (stops nowlive first).
+
+**Icon.** Drawn in-process (no image files): rounded keycap + the Segoe Fluent
+Icons keyboard glyph (`U+E765`, falls back to Segoe MDL2 Assets, then to three
+drawn key rows), generated natively at 16/20/24/32/48/64 and packed into a
+multi-size 32bpp ICO. Blue keycap while nowlive runs, grey while it is off, so
+the tray shows state at a glance. `-IconPath foo.ico` (or a .png/.jpg) replaces
+it; `-Action icon` writes `tray-icon-on.ico` / `tray-icon-off.ico` next to the
+script plus a pixel census, for eyeballing the art outside a running tray.
+
+**Disabling without uninstalling.** Two independent switches, both in the
+tray menu:
+
+| Want | Do |
+|---|---|
+| Stop the OLED loop now, keep the tray icon | uncheck **Enabled** |
+| Stop it now *and* after every reboot (keep the tray icon) | uncheck **Enabled** (the choice is written to `tray.state`) |
+| No tray icon either, permanently | **Exit**, then uncheck **Start with Windows** (or `-Action uninstall`) |
+| Everything gone | `-Action disable` then `-Action uninstall` |
+
+`tray.state` (`1`/`0`) is the source of truth, not the window: the tray
+re-reads it every 2 s, so a running tray follows an outside `-Action
+disable`, a crash cannot silently disable the loop (it restarts nowlive,
+with a 15 s retry gap so a broken interpreter cannot spin), and `-Action
+start` from a shell flips the menu checkmark back. Double-launch is blocked
+by a `Local\timeless82-tray` mutex. Default child args are `--direct`
+(change with `-NowLiveArgs`, e.g. `'--maxn 32'` or `--dry`).
+
+Headless control (same code path as the menu, for scripts/tests):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action install    # add Startup shortcut
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action start [-NowLiveArgs '--direct --maxn 32']
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action enable     # desired=on  (starts nowlive)
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action disable    # desired=off (stops nowlive, survives reboot)
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action stop       # alias for disable
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action status     # enabled=<desired> live=<running> autostart=<bool>
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action uninstall
+```
+
+Running `tray.ps1` with no `-Action` (what the shortcut does) installs the
+shortcut if missing, then obeys `tray.state`: it starts nowlive only if the
+preference is on, and shows the icon either way.
+
 ## Safety rules
 
 1. Wired mode only (`320F:5055` present). Never send anything to `FFEF`/MI_02.

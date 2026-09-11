@@ -15,3 +15,6 @@ zaname_*.png
 cnt_*.png
 # captures / logs
 *.log
+nowlive.pid
+tray.state
+tray-icon-*.ico
