@@ -11,17 +11,19 @@ Direct path (--direct): imports nowshow (same process, no subprocess),
 packs Nx1024B bin (column-major MSB-top) and uploads with
 timeless82.exe oledN (screen 5 = disp 4, interval slows the scroll).
 --dry renders (+packs in direct mode) without uploading or touching JSON.
---interval MS sets frame interval (default 1000; larger = slower).
---disp I sets screen index (default 4 = screen 5).
---maxn N caps frames (1..128, default 128): lower = smaller upload, shorter
-keyboard freeze (~65ms/frame), but faster scroll. Track changes are debounced
+Scroll pace = STEP px per frame interval (CONFIG[39..40], now live). The loop
+derives the interval from --speed PXPS (default 110) so a smaller frame budget
+keeps the same pace instead of racing; --interval MS pins a fixed interval
+instead. --disp I sets screen index (default 4 = screen 5).
+--maxn N caps frames (1..128, default 32): lower = smaller upload, shorter
+keyboard freeze (~65ms/frame), chunkier motion. Track changes are debounced
 (2s settle) so rapid skipping = one upload, not many.
 The board's firmware stalls keyboard scanning while it ingests a display
 upload (~65ms per frame), so a running loop uploads only when the user is
 idle: it waits for no keyboard/mouse input for --idle-ms (default 1500)
 before starting, and defers otherwise. --once uploads immediately.
 
-Usage: nowlive.py [--once] [--direct] [--dry] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [interval_sec=5]
+Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [interval_sec=5]
 """
 import subprocess
 import sys
@@ -33,9 +35,10 @@ EXE = HERE + r"\timeless82.exe"
 BIN = HERE + r"\npN.bin"
 W, H = 128, 64
 MAXN = 128  # hardware playback cap (verified: 128 plays, 129+ wraps)
-MAXN_DEFAULT = 64  # default frame budget: ~half the freeze, still smooth
+MAXN_DEFAULT = 32  # default frame budget: short upload, short keyboard freeze
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
-INTERVAL = 1000  # frame interval ms (CONFIG[43..44] u16 LE): larger = slower
+SPEED = 110  # target scroll pace px/s; the frame interval is derived from it
+INTERVAL = None  # explicit --interval MS override; None = derive from SPEED
 IDLE_MS = 1500  # only start an upload after this long with no keyboard/mouse
 DEBOUNCE = 2.0  # settle time before uploading (collapses rapid track skips)
 
@@ -120,8 +123,13 @@ def refresh_json(maxn=MAXN):
     return True
 
 
-def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN):
-    """Render in-process -> pack N frames -> optional oledN upload."""
+def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
+                   speed=SPEED):
+    """Render in-process -> pack N frames -> optional oledN upload.
+
+    interval=None derives the device frame interval from the render's STEP and
+    the target speed, so shrinking --maxn costs smoothness, not pace.
+    """
     t0 = time.time()
     try:
         frames, meta = nowshow.get_frames(maxn)
@@ -143,8 +151,12 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN):
             ms = int((time.time() - t0) * 1000)
             print(f"rendered+packed dry n={n} ({ms}ms) -> {BIN}", flush=True)
             return True
-        r2 = subprocess.run([EXE, "oledN", BIN, str(n), str(disp),
-                             str(interval)],
+        step = meta["step"]
+        # Only a scrolling render has a STEP to spread over an interval; a
+        # static frame ignores it, so 1000 just keeps the value sane.
+        iv = interval or (round(step * 1000 / speed) if step else 1000)
+        iv = min(max(int(iv), 1), 60000)
+        r2 = subprocess.run([EXE, "oledN", BIN, str(n), str(disp), str(iv)],
                             check=True, capture_output=True, text=True,
                             timeout=120, cwd=HERE)
     except subprocess.CalledProcessError as e:
@@ -155,7 +167,8 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN):
         print(f"refresh-direct failed: {e}", flush=True)
         return False
     ms = int((time.time() - t0) * 1000)
-    print(f"direct upload done n={n} disp={disp} interval={interval} ({ms}ms)", flush=True)
+    print(f"direct upload done n={n} step={step} disp={disp} interval={iv}ms "
+          f"({ms}ms upload, {n * iv / 1000:.1f}s loop)", flush=True)
     return True
 
 
@@ -177,6 +190,7 @@ def main(argv):
     direct = "--direct" in argv
     dry = "--dry" in argv
     disp, interval, idle_gate, maxn = DISP, INTERVAL, IDLE_MS, MAXN_DEFAULT
+    speed = SPEED
     poll = 5
     args = list(argv[1:])
     i = 0
@@ -185,14 +199,18 @@ def main(argv):
         nxt = args[i + 1] if i + 1 < len(args) else ""
         if a == "--disp" and nxt.isdigit():
             disp = min(max(int(nxt), 0), 5); i += 2; continue
-        if a in ("--interval", "--speed") and nxt.isdigit():
+        if a == "--interval" and nxt.isdigit():
             interval = min(max(int(nxt), 1), 60000); i += 2; continue
+        if a == "--speed" and nxt.isdigit():
+            speed = min(max(int(nxt), 1), 10000); i += 2; continue
         if a in ("--idle-ms", "--idle") and nxt.isdigit():
             idle_gate = min(max(int(nxt), 0), 600000); i += 2; continue
         if a in ("--maxn", "--frames") and nxt.isdigit():
             maxn = min(max(int(nxt), 1), MAXN); i += 2; continue
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
             interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
+        elif a.startswith("--speed=") and a.split("=", 1)[1].isdigit():
+            speed = min(max(int(a.split("=", 1)[1]), 1), 10000)
         elif a.startswith("--idle-ms=") and a.split("=", 1)[1].isdigit():
             idle_gate = min(max(int(a.split("=", 1)[1]), 0), 600000)
         elif a.startswith("--maxn=") and a.split("=", 1)[1].isdigit():
@@ -205,13 +223,14 @@ def main(argv):
     gate_upload = direct and not dry and not once and idle_gate > 0
     debounce = 0.0 if once else DEBOUNCE
     print(f"poll every {poll}s, --once={once} --direct={direct} "
-          f"--dry={dry} disp={disp} interval={interval} maxn={maxn} "
+          f"--dry={dry} disp={disp} interval={interval or 'auto'} "
+          f"speed={speed}px/s maxn={maxn} "
           f"idle_gate={'on' if gate_upload else 'off'}"
           + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
     last = None
     pending = None
     pending_at = 0.0
-    refresh = (lambda: refresh_direct(dry, disp, interval, maxn)) if direct else \
+    refresh = (lambda: refresh_direct(dry, disp, interval, maxn, speed)) if direct else \
               (lambda: refresh_dry_json(maxn)) if dry else \
               (lambda: refresh_json(maxn))
     while True:

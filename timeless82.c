@@ -573,7 +573,7 @@ static int cmd_oled(int argc, char **argv) {
     memset(cfgbuf, 0, sizeof(cfgbuf));
     cfgbuf[33] = (unsigned char)dispidx;
     cfgbuf[34] = (unsigned char)nframes;
-    cfgbuf[43] = 100; // frame interval 100ms
+    cfgbuf[39] = 100; cfgbuf[40] = 0; // frame interval u16 LE at [39..40]
     int ok = 1;
     ok &= ff1c_sendA(h, 0x01, 0, 0, NULL, 1);
     ok &= ff1c_sendA(h, 0x01, 0, 0, NULL, 1);
@@ -616,9 +616,13 @@ static int cmd_oled(int argc, char **argv) {
 // gmk87-c-spec 240x135 sibling, confirmed by capture):
 //   [22]=0x03 magic, [33]=disp_idx (0-based screen index: 4 = screen 5),
 //   [34]=nframes, [35..37]=BCD clock sec/min/hour (capture 39 55 18 = 18:55:57),
-//   [43..44]=frame interval u16 LE MILLISECONDS (capture 00 00;
-//   larger = slower; old oled used 100ms). Earlier oledN wrongly wrote the
-//   interval into the clock byte [35], so the knob had no visible effect.
+//   [39..40]=frame interval u16 LE MILLISECONDS: larger = slower, stock
+//   default 100ms. Verified by frida capture of the stock app's own CONFIG
+//   write: app set to 302ms -> 2E 01 at cfg[39..40], clock at [35..37]
+//   matching the write timestamp, checksum u16 LE at [1..2] valid.
+//   Earlier oledN wrote [43..44], which the firmware ignores; the device
+//   echoes the whole config buffer verbatim, so reading our own bytes back
+//   at our own offset falsely "confirmed" a knob that did nothing.
 // The board stalls its keyboard scanning while ingesting IMAGE data, and
 // the transfer is firmware-paced (~7s for 107 frames; per-chunk ACK wait is
 // optimal, fire-and-forget is slower because the IN buffer backs up). So
@@ -685,9 +689,9 @@ static int cmd_oledN(int argc, char **argv) {
         cfg[36] = (unsigned char)(((lt->tm_min / 10) << 4) | (lt->tm_min % 10));
         cfg[37] = (unsigned char)(((lt->tm_hour / 10) << 4) | (lt->tm_hour % 10));
     }
-    // [43..44] frame interval u16 LE milliseconds: larger = slower.
-    cfg[43] = (unsigned char)(interval & 0xFF);
-    cfg[44] = (unsigned char)((interval >> 8) & 0xFF);
+    // [39..40] frame interval u16 LE milliseconds: larger = slower.
+    cfg[39] = (unsigned char)(interval & 0xFF);
+    cfg[40] = (unsigned char)((interval >> 8) & 0xFF);
     int ok = 1, r;
     r = ff1c_sendA(h, 0x02, 0, 0, NULL, 1); printf("COMMIT %s\n", r ? "ack" : "NO-ACK"); ok &= r;
     r = ff1c_sendA(h, 0x01, 0, 0, NULL, 1); printf("INIT %s\n", r ? "ack" : "NO-ACK"); ok &= r;

@@ -65,7 +65,7 @@ running < 3 MB. Python is not involved.
   Slots 0-3 hold user animation, 4-20 empty.
 - Upload trial: `oled FILE [NFRAMES=1] [DISP_IDX=1]` sends Evision display
   pipeline INIT,INIT,CONFIG,COMMIT,0x23,INIT,IMAGE(56B chunks),COMMIT
-  with `cfg[33]=disp_idx, cfg[34]=nframes, cfg[43]=100ms`.
+  with `cfg[33]=disp_idx, cfg[34]=nframes, cfg[39..40]=100ms`.
   `oled_test.bin` = top-white/bottom-black + border + diagonal.
 - 2026-09-10: zeroed-CONFIG trial proved CONFIG+COMMIT applies; screen
   switched to image slot showing stored frame ("rocket").
@@ -103,7 +103,7 @@ running < 3 MB. Python is not involved.
 
 ## OLED frame upload (Frida-proven, no stock app)
 
-- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=1000]`: FILE = N concatenated
+- `oledN FILE NFRAMES [DISP_IDX=4] [INTERVAL=100]`: FILE = N concatenated
   1024B frames (N=1..128; 128 = verified hardware cap, higher wraps),
   column-major 1-bit MSB-top
   (byte[c*8+pg] bit 7-k = pixel (pg*8+k, c)). (`oled30` = alias.)
@@ -111,9 +111,21 @@ running < 3 MB. Python is not involved.
   COMMIT(0x02), INIT, CONFIG(0x06 len 56), COMMIT. No 0x23.
 - CONFIG = 56B zero except `[22]=0x03`, `[33]=disp_idx` (0-based screen:
   4 = screen 5 user anim), `[34]=N`, `[35..37]=BCD clock` sec/min/hour
-  (capture `39 55 18` = 18:55:57), `[43..44]=frame interval u16 LE ms`
-  (larger = slower; capture 0, old `oled` used 100). Note: the earlier
-  `oledN` bug wrote interval into clock byte `[35]`, so the knob did nothing.
+  (capture `39 55 18` = 18:55:57), `[39..40]=frame interval u16 LE ms`
+  (larger = slower; stock default 100).
+- 2026-09-11: interval offset proven by Frida capture of the stock app's own
+  CONFIG write (app set to 302ms -> `2E 01` at `[39..40]`, clock bytes
+  matching the write timestamp exactly, checksum valid). The firmware
+  IGNORES `[43..44]`, and it echoes the whole config buffer back verbatim,
+  so reading our own bytes at our own offset made a dead knob look alive.
+  The old "interval is clamped, frames are the only speed lever" note was a
+  consequence of that bug, not of the firmware.
+- Tools used to prove it (read-only, no writes to the device):
+  `py -3 frida_hid.py [secs=120] [out]` attaches to the stock app and logs
+  every HID write with a millisecond timestamp and the full 64-byte report
+  (the stock app is `requireAdministrator`, so Frida needs UAC);
+  `py -3 cfgwatch.py [out]` polls the device's stored CONFIG (`q 5 56 0`) and
+  logs every change, needing no admin.
 
 ## OLED live now-playing (independent, no stock app)
 
@@ -130,9 +142,10 @@ running < 3 MB. Python is not involved.
   smallest integer STEP = ceil((tw+MIN_GAP)/maxn) -> N*STEP==L exact seam
   (frameN byte-identical frame0); stale PNGs >= N deleted. Upload time (and
   keyboard freeze) is ~65ms/frame, so maxn trades scroll speed vs freeze:
-  long title -> 32 frames ~2.1s, 64 ~4.1s, 128 ~8.2s. The CONFIG interval
-  byte is clamped by this firmware (60000ms still plays fast), so frames are
-  the only real speed lever.
+  long title -> 32 frames ~2.1s, 64 ~4.1s, 128 ~8.2s. Pace = STEP px per
+  frame interval, and the interval is derived from `--speed PXPS` (default
+  110), so `--maxn` trades smoothness (smaller STEP) against freeze time
+  without changing how fast the text crosses the screen.
 - JSON path (default, no HID): `nowlive.py` re-renders on track/state
   change (no per-minute refresh anymore), `setframes.py` writes N PNGs into
   slots 0..N-1 (grows the slot
@@ -144,11 +157,21 @@ running < 3 MB. Python is not involved.
   No 0x23. Frames = Nx1024B packed col-major MSB-top
   (`byte[c*8+pg]` bit `7-k` = pixel `(pg*8+k, c)`); CONFIG 56B zero except
   `[22]=0x03, [33]=disp_idx(4=screen 5), [34]=N, [35..37]=BCD clock,
-  [43..44]=frame interval u16 LE ms`.
+  [39..40]=frame interval u16 LE ms`.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
-  render+pack only, `--interval MS` frame time default 1000, `--disp I`
-  default 4, `--maxn N` frame budget 1..128 default 64); slower scroll but
-  longer freeze: `--maxn 128`; snappier: `--maxn 32`.
+  render+pack only, `--speed PXPS` scroll pace default 110, `--interval MS`
+  pins a fixed device frame interval instead, `--disp I` default 4, `--maxn N`
+  frame budget 1..128 default 32). Pace = STEP px per frame interval, and the
+  interval is derived as `round(STEP*1000/speed)`, so the frame budget trades
+  smoothness against freeze time instead of changing the scroll speed.
+  Measured on a 76-char YouTube title (title width 1120px, so L=1152):
+  `--maxn 16` -> n=16 STEP=71 iv=645ms upload 1.9s; `--maxn 32` -> n=32
+  STEP=36 iv=327ms 2.9s; `--maxn 128` -> n=125 STEP=9 iv=82ms 9.0s. All loop
+  in ~10.2-10.5s, so fewer frames never scroll faster, only chunkier - and
+  STEP is what a viewer notices, so long titles want a bigger `--maxn`.
+- JSON path caveat: there the stock app owns the rate, so `--maxn` does
+  change the pace (speed = STEP px per the app's own FrameIntervalTime).
+  Lower the frame budget there and raise the app's interval to match.
 - Keyboard lock during upload: the board stalls its key scanning while it
   ingests IMAGE data (~65ms/frame; firmware-paced, and the per-chunk
   ACK wait is already optimal — fire-and-forget is *slower*, ~20s, because
