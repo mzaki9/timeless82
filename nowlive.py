@@ -23,7 +23,15 @@ upload (~65ms per frame), so a running loop uploads only when the user is
 idle: it waits for no keyboard/mouse input for --idle-ms (default 1500)
 before starting, and defers otherwise. --once uploads immediately.
 
-Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [interval_sec=5]
+Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [--mode np|sys|auto] [--syssec N] [interval_sec=5]
+
+Panels (--mode, persisted in tray.mode, chosen from the tray Screen menu):
+`np` = now playing, or the clock/date card when nothing plays; `sys` =
+system monitor (CPU/GPU bars + RAM/temp/battery/net/disk); `auto` = `np`
+while a track plays, `sys` while idle. The sys panel re-uploads every
+--syssec seconds (default 5) because its values are live; the clock card
+re-uploads once a minute. Album art is dumped by nowplaying.exe to np_art.bin
+and used when the session has a thumbnail.
 """
 import subprocess
 import sys
@@ -41,9 +49,17 @@ SPEED = 110  # target scroll pace px/s; the frame interval is derived from it
 INTERVAL = None  # explicit --interval MS override; None = derive from SPEED
 IDLE_MS = 1500  # only start an upload after this long with no keyboard/mouse
 DEBOUNCE = 2.0  # settle time before uploading (collapses rapid track skips)
+MODES = ("np", "sys", "auto")  # np = media/clock, sys = system monitor
+MODE_DEFAULT = "auto"  # auto: sys while nothing plays, np otherwise
+SYS_SEC = 5  # system panel re-upload cadence (seconds)
+ART = HERE + r"\np_art.bin"  # thumbnail dump target handed to nowplaying.exe
+NP_ARGS = [NP, ART]
 
 sys.path.insert(0, HERE)
+import nowart
 import nowshow
+import nowsys
+from datetime import datetime
 
 
 def idle_ms():
@@ -62,12 +78,34 @@ def idle_ms():
 
 def current():
     try:
-        out = subprocess.run([NP], capture_output=True, text=True,
+        out = subprocess.run(NP_ARGS, capture_output=True, text=True,
                              timeout=10).stdout.strip()
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] err poll: {e}", flush=True)
         return "ERR"  # stable token: no refresh storm
     return out or "EMPTY"
+
+
+def has_track(cur):
+    return bool(cur) and cur not in ("EMPTY", "NO-SESSION") and \
+        bool((cur.split("\t") + [""])[1])
+
+
+def panel_for(cur, mode):
+    """Which panel this tick should show."""
+    if mode in ("np", "sys"):
+        return mode
+    return "np" if has_track(cur) else "sys"
+
+
+def change_key(panel, cur, sys_sec=SYS_SEC):
+    """What an upload depends on: the only thing that re-uploads a panel."""
+    if panel == "sys":
+        return ("sys", "", int(time.time() // sys_sec))
+    if not has_track(cur):
+        # Clock card: the device loops one upload, so tick it once a minute.
+        return ("np", "", datetime.now().strftime("%H:%M"))
+    return ("np", cur, 0)
 
 
 def pack_frames(frames):
@@ -92,21 +130,34 @@ def pack_frames(frames):
     return bytes(out)
 
 
-def refresh_json(maxn=MAXN):
+def render_frames(panel, maxn=MAXN, pdh=None):
+    """Render the selected panel. Returns (frames, meta); may raise."""
+    if panel == "sys":
+        return nowsys.render(nowsys.sample(pdh))
+    src = nowart.load(ART)
+    return nowshow.get_frames(maxn, nowart.art_image(src) if src else None)
+
+
+def save_pngs(frames, n):
+    import glob
+    import os
+    for i, im in enumerate(frames):
+        im.save(HERE + rf"\anim_np_{i}.png")
+    for stale in glob.glob(HERE + r"\anim_np_*.png"):
+        try:
+            idx = int(stale[len(HERE + r"\anim_np_"):-len(".png")])
+        except ValueError:
+            continue
+        if idx >= n:
+            os.remove(stale)
+
+
+def refresh_json(maxn=MAXN, panel="np", pdh=None):
     t0 = time.time()
     try:
-        frames, meta = nowshow.get_frames(maxn)
-        import os
-        for i, im in enumerate(frames):
-            im.save(HERE + rf"\anim_np_{i}.png")
+        frames, meta = render_frames(panel, maxn, pdh)
+        save_pngs(frames, meta["n"])
         n = meta["n"]
-        for stale in __import__("glob").glob(HERE + r"\anim_np_*.png"):
-            try:
-                idx = int(stale[len(HERE + r"\anim_np_"):-len(".png")])
-            except ValueError:
-                continue
-            if idx >= n:
-                os.remove(stale)
         pngs = [HERE + rf"\anim_np_{i}.png" for i in range(n)]
         r2 = subprocess.run([sys.executable, HERE + r"\setframes.py"] + pngs,
                             check=True, capture_output=True, text=True,
@@ -124,7 +175,7 @@ def refresh_json(maxn=MAXN):
 
 
 def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
-                   speed=SPEED):
+                   speed=SPEED, panel="np", pdh=None):
     """Render in-process -> pack N frames -> optional oledN upload.
 
     interval=None derives the device frame interval from the render's STEP and
@@ -132,18 +183,9 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
     """
     t0 = time.time()
     try:
-        frames, meta = nowshow.get_frames(maxn)
+        frames, meta = render_frames(panel, maxn, pdh)
         n = meta["n"]
-        import os
-        for i, im in enumerate(frames):
-            im.save(HERE + rf"\anim_np_{i}.png")
-        for stale in __import__("glob").glob(HERE + r"\anim_np_*.png"):
-            try:
-                idx = int(stale[len(HERE + r"\anim_np_"):-len(".png")])
-            except ValueError:
-                continue
-            if idx >= n:
-                os.remove(stale)
+        save_pngs(frames, n)
         bin_bytes = pack_frames(frames)
         with open(BIN, "wb") as f:
             f.write(bin_bytes)
@@ -172,12 +214,11 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
     return True
 
 
-def refresh_dry_json(maxn=MAXN):
+def refresh_dry_json(maxn=MAXN, panel="np", pdh=None):
     """Render only (no JSON write, no upload)."""
     try:
-        frames, meta = nowshow.get_frames(maxn)
-        for i, im in enumerate(frames):
-            im.save(HERE + rf"\anim_np_{i}.png")
+        frames, meta = render_frames(panel, maxn, pdh)
+        save_pngs(frames, meta["n"])
     except Exception as e:
         print(f"dry render failed: {e}", flush=True)
         return False
@@ -191,6 +232,7 @@ def main(argv):
     dry = "--dry" in argv
     disp, interval, idle_gate, maxn = DISP, INTERVAL, IDLE_MS, MAXN_DEFAULT
     speed = SPEED
+    mode, sys_sec = MODE_DEFAULT, SYS_SEC
     poll = 5
     args = list(argv[1:])
     i = 0
@@ -207,6 +249,10 @@ def main(argv):
             idle_gate = min(max(int(nxt), 0), 600000); i += 2; continue
         if a in ("--maxn", "--frames") and nxt.isdigit():
             maxn = min(max(int(nxt), 1), MAXN); i += 2; continue
+        if a == "--mode" and nxt in MODES:
+            mode = nxt; i += 2; continue
+        if a == "--syssec" and nxt.isdigit():
+            sys_sec = min(max(int(nxt), 1), 300); i += 2; continue
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
             interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
         elif a.startswith("--speed=") and a.split("=", 1)[1].isdigit():
@@ -215,6 +261,10 @@ def main(argv):
             idle_gate = min(max(int(a.split("=", 1)[1]), 0), 600000)
         elif a.startswith("--maxn=") and a.split("=", 1)[1].isdigit():
             maxn = min(max(int(a.split("=", 1)[1]), 1), MAXN)
+        elif a.startswith("--mode=") and a.split("=", 1)[1] in MODES:
+            mode = a.split("=", 1)[1]
+        elif a.startswith("--syssec=") and a.split("=", 1)[1].isdigit():
+            sys_sec = min(max(int(a.split("=", 1)[1]), 1), 300)
         elif a.isdigit():
             poll = min(max(int(a), 1), 300)  # bare positional = poll seconds
         i += 1
@@ -224,15 +274,27 @@ def main(argv):
     debounce = 0.0 if once else DEBOUNCE
     print(f"poll every {poll}s, --once={once} --direct={direct} "
           f"--dry={dry} disp={disp} interval={interval or 'auto'} "
-          f"speed={speed}px/s maxn={maxn} "
+          f"speed={speed}px/s maxn={maxn} mode={mode} syssec={sys_sec} "
           f"idle_gate={'on' if gate_upload else 'off'}"
           + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
+    pdh = None
+    if not dry:
+        try:
+            pdh = nowsys.Pdh()
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] sys panel unavailable: {e}",
+                  flush=True)
     last = None
     pending = None
     pending_at = 0.0
-    refresh = (lambda: refresh_direct(dry, disp, interval, maxn, speed)) if direct else \
-              (lambda: refresh_dry_json(maxn)) if dry else \
-              (lambda: refresh_json(maxn))
+
+    def refresh(panel):
+        if direct:
+            return refresh_direct(dry, disp, interval, maxn, speed, panel, pdh)
+        if dry:
+            return refresh_dry_json(maxn, panel, pdh)
+        return refresh_json(maxn, panel, pdh)
+
     while True:
         try:
             cur = current()
@@ -241,24 +303,35 @@ def main(argv):
                 if once:
                     return 0
                 continue
-            # No clock in the frames, so they stay valid over time: only a
-            # track/state change (cur != last) needs a re-upload. Debounce:
-            # wait for the state to settle so rapid track-skipping collapses
-            # into a single upload instead of one freeze per step.
-            if cur != last:
-                if cur != pending:
-                    pending = cur
+            panel = panel_for(cur, mode)
+            if panel == "sys" and pdh is None:
+                try:
+                    pdh = nowsys.Pdh()
+                except Exception as e:
+                    print(f"[{time.strftime('%H:%M:%S')}] sys panel failed: {e}",
+                          flush=True)
+                    panel = "np"  # this tick only; the next one retries
+            key = change_key(panel, cur, sys_sec)
+            # Frames stay valid while nothing changes: the device loops one
+            # upload. Debounce settles rapid track skips into one upload, so it
+            # keys on panel+content only: the sys time bucket changes every
+            # tick and must not restart the settle window.
+            if key != last:
+                if key[:2] != pending:
+                    pending = key[:2]
                     pending_at = time.time()
-                if (time.time() - pending_at) >= debounce:
+                # The settle window exists to collapse rapid track skipping;
+                # the sys panel is time-bucketed and has nothing to collapse.
+                if (time.time() - pending_at) >= (0.0 if panel == "sys" else debounce):
                     if gate_upload and idle_ms() < idle_gate:
                         print(f"[{time.strftime('%H:%M:%S')}] deferred "
                               f"(input {idle_ms()}ms ago, need {idle_gate}ms)",
                               flush=True)
                     else:
-                        print(f"[{time.strftime('%H:%M:%S')}] change: {cur[:80]}",
+                        print(f"[{time.strftime('%H:%M:%S')}] change: {key}",
                               flush=True)
-                        if refresh():
-                            last = cur
+                        if refresh(panel):
+                            last = key
                             pending = None
         except Exception:
             import traceback

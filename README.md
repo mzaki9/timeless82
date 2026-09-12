@@ -129,13 +129,28 @@ running < 3 MB. Python is not involved.
 
 ## OLED live now-playing (independent, no stock app)
 
-- Pipeline: `nowplaying.exe` (TSV `status\ttitle\tartist` / `NO-SESSION`)
+- Pipeline: `nowplaying.exe [art_path]` (TSV `status\ttitle\tartist` /
+  `NO-SESSION`; with a path, also dumps the raw SMTC thumbnail bytes there,
+  deleting the file when the session has no cover art)
   -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`; layout: top bar =
   drawn transport glyph left (play triangle / pause bars) + date right,
   scrolling **title** hero below the rule, **artist** static centered at
-  the bottom (ellipsized). No clock, so frames never go stale and the loop
-  re-uploads only on track/state change. Idle = date + "NO MEDIA";
-  short/idle = STATIC_N=4 identical frames) -> pack -> `oledN`.
+  the bottom (ellipsized). Idle = big clock + date card, re-uploaded once a
+  minute; short/idle = STATIC_N=4 identical frames) -> pack -> `oledN`.
+- **Panels.** `nowlive.py --mode np|sys|auto` picks what the screen shows
+  (persisted in `tray.mode`, chosen from the tray **Screen** menu):
+  - `np` — now playing, or the clock/date card when nothing plays.
+  - `sys` — system monitor (`nowsys.py`): CPU + GPU bars, then
+    `RAM n%`, temperature, battery, clock, network, disk rows. Values are
+    live, so the panel re-uploads every `--syssec` seconds (default 5).
+  - `auto` — `np` while a track plays, `sys` while idle.
+  Missing counters render `--` (this machine exposes no Thermal Zone
+  Information, so temperature is always `--`); nothing raises.
+- **Album art.** When the session has a thumbnail, `nowart.py` decodes it,
+  center-crops to a square (no stretch), autocontrasts and thresholds to
+  1-bit, and `nowshow.render_track` lays it out as a 56x56 left column with
+  a narrower scrolling title/artist column beside it. No thumbnail -> the
+  full-width layout, unchanged.
 - Frame count dynamic via `pick_plan` (computed on the **title** width):
   STATIC_N=4 when short/idle (step 0);
   else `--maxn` (default 64, hard cap MAXN=128) sets a frame budget, with the
@@ -161,7 +176,9 @@ running < 3 MB. Python is not involved.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
   render+pack only, `--speed PXPS` scroll pace default 110, `--interval MS`
   pins a fixed device frame interval instead, `--disp I` default 4, `--maxn N`
-  frame budget 1..128 default 32). Pace = STEP px per frame interval, and the
+  frame budget 1..128 default 32, `--mode np|sys|auto` panel selection,
+  `--syssec N` system-panel cadence in seconds 1..300 default 5).
+  Pace = STEP px per frame interval, and the
   interval is derived as `round(STEP*1000/speed)`, so the frame budget trades
   smoothness against freeze time instead of changing the scroll speed.
   Measured on a 76-char YouTube title (title width 1120px, so L=1152):
@@ -169,6 +186,9 @@ running < 3 MB. Python is not involved.
   STEP=36 iv=327ms 2.9s; `--maxn 128` -> n=125 STEP=9 iv=82ms 9.0s. All loop
   in ~10.2-10.5s, so fewer frames never scroll faster, only chunkier - and
   STEP is what a viewer notices, so long titles want a bigger `--maxn`.
+  `nowshow.py` (dry render), `nowsys.py` (dry render of the sys panel) and
+  `nowart.py` (x4 `art_preview.png` of the current `np_art.bin`) each render
+  to PNGs for eyeballing with no hardware and no upload.
 - JSON path caveat: there the stock app owns the rate, so `--maxn` does
   change the pace (speed = STEP px per the app's own FrameIntervalTime).
   Lower the frame budget there and raise the app's interval to match.
@@ -181,7 +201,9 @@ running < 3 MB. Python is not involved.
   not fight it, it just uploads less and only at rest:
   (a) `--maxn` caps frames; (b) 2s debounce collapses rapid track-skipping
   into a single upload; (c) `--idle-ms` (default 1500; 0 disables) defers
-  the direct upload until no keyboard/mouse input. When a track changes
+  the direct upload until no keyboard/mouse input (the sys panel skips the
+  debounce: its key is time-bucketed, so there is nothing to collapse).
+  When a track changes
   while you are typing it prints `deferred (input Nms ago)` and uploads the
   moment you pause. `--once` uploads immediately.
 - Diagnostic: `timeless82.exe hold [MODE=open|wo|rw|init] [MS]` opens the
@@ -216,6 +238,10 @@ taskkill /F /PID $pid
 
 WinForms `NotifyIcon` (no new deps, no admin, no build). Tray menu:
 
+- **Screen** — sub-items **Now playing**, **System monitor**, **Auto**; the
+  choice is written to `tray.mode` and nowlive is restarted with it (there is
+  no live-reload channel). Exactly one is checked, from the file, so an
+  outside `-Action mode` flips the checkmark back.
 - **Enabled** — starts/stops `py -3 nowlive.py` (child tree killed with
   `taskkill /T`; pid tracked in `nowlive.pid`). Output -> `nowlive.log`
   (+ `nowlive.err.log`).
@@ -247,8 +273,10 @@ re-reads it every 2 s, so a running tray follows an outside `-Action
 disable`, a crash cannot silently disable the loop (it restarts nowlive,
 with a 15 s retry gap so a broken interpreter cannot spin), and `-Action
 start` from a shell flips the menu checkmark back. Double-launch is blocked
-by a `Local\timeless82-tray` mutex. Default child args are `--direct`
-(change with `-NowLiveArgs`, e.g. `'--maxn 32'` or `--dry`).
+by a `Local\timeless82-tray` mutex. Default child args are `--direct --mode
+<selected>` (change with `-NowLiveArgs`, e.g. `'--maxn 32'` or `--dry`); the
+mode is always appended from `tray.mode`, which is the source of truth for
+the panel the same way `tray.state` is for on/off.
 
 Headless control (same code path as the menu, for scripts/tests):
 
@@ -258,7 +286,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action start [-Now
 powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action enable     # desired=on  (starts nowlive)
 powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action disable    # desired=off (stops nowlive, survives reboot)
 powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action stop       # alias for disable
-powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action status     # enabled=<desired> live=<running> autostart=<bool>
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action mode -Mode np|sys|auto   # panel choice (restarts nowlive)
+powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action status     # enabled=<desired> live=<running> autostart=<bool> mode=<m>
 powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Action uninstall
 ```
 

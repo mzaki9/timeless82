@@ -1,18 +1,23 @@
 # tray.ps1 — tray menu + autostart for nowlive.py (zero deps, WinForms only).
 #   powershell -File tray.ps1                       # tray icon (default)
 #   powershell -File tray.ps1 -Action start|stop|enable|disable|status|install|uninstall|icon
-# Menu: Enabled (start/stop nowlive), Start with Windows (add/remove the
-# Startup shortcut), Open log, Exit.
+#   powershell -File tray.ps1 -Action mode -Mode np|sys|auto
+# Menu: Enabled (start/stop nowlive), Screen (which panel nowlive shows),
+# Start with Windows (add/remove the Startup shortcut), Open log, Exit.
 # Enabled is persisted in tray.state, so unchecking it survives a reboot:
 # the tray still starts at login but leaves nowlive off until you re-check it.
+# Screen is persisted in tray.mode and applied at launch (nowlive takes
+# --mode), so picking a panel restarts the loop but survives everything else.
 # Icon: drawn in-process (accent keycap + keyboard glyph) in six sizes, and it
 # swaps to a grey keycap while nowlive is off. -IconPath overrides it with a
 # user .ico/.png. -Action icon dumps the generated pair for eyeballing.
 param(
-    [ValidateSet('tray', 'start', 'stop', 'enable', 'disable', 'status', 'install', 'uninstall', 'icon')]
+    [ValidateSet('tray', 'start', 'stop', 'enable', 'disable', 'status', 'install', 'uninstall', 'icon', 'mode')]
     [string]$Action = 'tray',
     [string]$NowLiveArgs = '--direct',
     [string]$IconPath = '',
+    [ValidateSet('np', 'sys', 'auto')]
+    [string]$Mode = '',
     [switch]$NoAutoStart
 )
 
@@ -23,7 +28,9 @@ $ERRLOG = Join-Path $HERE 'nowlive.err.log'
 $LNK = Join-Path ([Environment]::GetFolderPath('Startup')) 'timeless82-tray.lnk'
 $PIDFILE = Join-Path $HERE 'nowlive.pid'
 $STATE = Join-Path $HERE 'tray.state'
+$MODEFILE = Join-Path $HERE 'tray.mode'
 $PS = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$MODES = 'np', 'sys', 'auto'
 
 function Install-Autostart {
     $sh = New-Object -ComObject WScript.Shell
@@ -49,6 +56,28 @@ function Set-Desired([bool]$v) {
     Set-Content -Path $STATE -Value $(if ($v) { '1' } else { '0' })
 }
 
+# Persisted panel preference: np|sys|auto in tray.mode, default auto. Same
+# shape as tray.state, so the file is the truth and a running tray picks it up.
+function Get-Mode {
+    if (-not (Test-Path $MODEFILE)) { return 'auto' }
+    $m = (Get-Content $MODEFILE -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($m -is [string]) { $m = $m.Trim() }
+    if ($MODES -contains $m) { return $m }
+    return 'auto'
+}
+function Set-Mode([string]$m) {
+    if ($MODES -notcontains $m) { throw "mode must be one of: $($MODES -join ', ')" }
+    Set-Content -Path $MODEFILE -Value $m
+}
+# Menu path: persist the panel, restart nowlive (it reads --mode at launch),
+# then refresh the exclusive checkmarks.
+function Set-ScreenMode([string]$m) {
+    Set-Mode $m
+    $script:lastTry = [datetime]::MinValue
+    if (Test-Live) { Stop-Live; Start-Live }
+    Sync-Tray
+}
+
 function Live-Pid {
     if ($script:proc -and -not $script:proc.HasExited) { return $script:proc.Id }
     if (Test-Path $PIDFILE) {
@@ -60,12 +89,16 @@ function Live-Pid {
 }
 function Start-Live {
     if (Live-Pid) { return }
+    # Persisted panel preference wins over any default args, so what the menu
+    # shows is what runs (nowlive has no live-reload channel).
+    $liveArgs = @($NowLiveArgs -split '\s+' | Where-Object { $_ })
+    if ($liveArgs -notcontains '--mode') { $liveArgs += @('--mode', (Get-Mode)) }
     $script:proc = Start-Process -FilePath 'py' `
-        -ArgumentList (@('-3', (Join-Path $HERE 'nowlive.py')) + ($NowLiveArgs -split '\s+' | Where-Object { $_ })) `
+        -ArgumentList (@('-3', (Join-Path $HERE 'nowlive.py')) + $liveArgs) `
         -WorkingDirectory $HERE -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $LOG -RedirectStandardError $ERRLOG
     Set-Content -Path $PIDFILE -Value $script:proc.Id
-    Write-Host "nowlive started pid=$($script:proc.Id) args=$NowLiveArgs"
+    Write-Host "nowlive started pid=$($script:proc.Id) args=$($liveArgs -join ' ')"
 }
 function Stop-Live {
     $id = Live-Pid
@@ -220,8 +253,15 @@ switch ($Action) {
     'install' { Install-Autostart; Write-Host "autostart -> $LNK"; exit 0 }
     'uninstall' { Uninstall-Autostart; Write-Host 'autostart removed'; exit 0 }
     'status' {
-        Write-Host ("enabled={0} live={1} autostart={2}" -f
-            (Get-Desired), (Test-Live), (Test-Autostart))
+        Write-Host ("enabled={0} live={1} autostart={2} mode={3}" -f
+            (Get-Desired), (Test-Live), (Test-Autostart), (Get-Mode))
+        exit 0
+    }
+    'mode' {
+        if (-not $Mode) { Write-Host "mode=$(Get-Mode)"; exit 0 }
+        Set-Mode $Mode
+        if (Test-Live) { Stop-Live; Start-Live }  # nowlive reads mode at launch
+        Write-Host "mode=$Mode"
         exit 0
     }
     'start' { Stop-Live; Start-Live; Set-Desired $true; exit 0 }
@@ -266,12 +306,20 @@ if (-not (Test-Autostart) -and -not $NoAutoStart) { Install-Autostart }
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miEnabled = New-Object System.Windows.Forms.ToolStripMenuItem 'Enabled'
 $miEnabled.CheckOnClick = $true
+$miScreen = New-Object System.Windows.Forms.ToolStripMenuItem 'Screen'
+$miModeNp = New-Object System.Windows.Forms.ToolStripMenuItem 'Now playing'
+$miModeSys = New-Object System.Windows.Forms.ToolStripMenuItem 'System monitor'
+$miModeAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Auto'
+foreach ($mi in @($miModeNp, $miModeSys, $miModeAuto)) {
+    $mi.CheckOnClick = $false  # exclusive radio: the checked one is the truth
+}
+$miScreen.DropDownItems.AddRange(@($miModeNp, $miModeSys, $miModeAuto))
 $miAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Start with Windows'
 $miAuto.CheckOnClick = $true
 $miAuto.Checked = Test-Autostart
 $miLog = New-Object System.Windows.Forms.ToolStripMenuItem 'Open log'
 $miExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
-$menu.Items.AddRange(@($miEnabled, $miAuto,
+$menu.Items.AddRange(@($miEnabled, $miScreen, $miAuto,
     (New-Object System.Windows.Forms.ToolStripSeparator), $miLog, $miExit))
 
 $script:iconOn = New-KeycapIcon $true
@@ -292,6 +340,10 @@ function Sync-Tray {
     $live = Test-Live
     if ($miEnabled.Checked -ne $want) { $miEnabled.Checked = $want }
     if ($miAuto.Checked -ne (Test-Autostart)) { $miAuto.Checked = Test-Autostart }
+    $m = Get-Mode
+    $miModeNp.Checked = $m -eq 'np'
+    $miModeSys.Checked = $m -eq 'sys'
+    $miModeAuto.Checked = $m -eq 'auto'
     $icon.Icon = $(if ($live) { $script:iconOn } else { $script:iconOff })
     $icon.Text = 'Timeless82 now-playing: ' + $(if ($live) { 'on' } else { 'off' })
 }
@@ -310,6 +362,11 @@ $miEnabled.Add_Click({
     Reconcile
     Sync-Tray
 })
+# Picking a panel rewrites tray.mode, then restarts nowlive so the new mode
+# takes effect (nowlive reads --mode once at launch).
+$miModeNp.Add_Click({ Set-ScreenMode 'np' })
+$miModeSys.Add_Click({ Set-ScreenMode 'sys' })
+$miModeAuto.Add_Click({ Set-ScreenMode 'auto' })
 $miAuto.Add_Click({
     if ($miAuto.Checked) { Install-Autostart } else { Uninstall-Autostart }
     Sync-Tray
