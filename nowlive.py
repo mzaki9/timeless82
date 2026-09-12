@@ -32,7 +32,8 @@ while a track plays, `sys` while idle; `fix` = stuck-pixel repair (full-field
 black/white cycle, `nowfix.py`) for --fixsec seconds, then it hands the
 preference back to auto. The sys panel re-uploads every
 --syssec seconds (default 10) because its values are live; the clock card
-re-uploads once a minute. Album art is dumped by nowplaying.exe to np_art.bin
+uploads CLOCK_ROLL minute-frames at a time and the device advances them
+itself. Album art is dumped by nowplaying.exe to np_art.bin
 and used when the session has a thumbnail.
 """
 import subprocess
@@ -120,8 +121,12 @@ def change_key(panel, cur, sys_sec=SYS_SEC):
     if panel == "sys":
         return ("sys", "", int(time.time() // sys_sec))
     if not has_track(cur):
-        # Clock card: the device loops one upload, so tick it once a minute.
-        return ("np", "", datetime.now().strftime("%H:%M"))
+        # Clock card: one upload holds CLOCK_ROLL one-minute frames and the
+        # device advances them itself, so re-roll only when the wall clock
+        # leaves the set. Bucketing the minute re-uploads exactly every
+        # CLOCK_ROLL minutes (and always before the frames go stale).
+        now = datetime.now()
+        return ("np", "", f"{now.hour}:{now.minute // nowshow.CLOCK_ROLL}")
     return ("np", cur, 0)
 
 

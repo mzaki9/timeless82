@@ -24,7 +24,7 @@ import math
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 W, H = 128, 64
 MAXN = 128  # hardware frame cap (verified: 128 frames play, 129+ wraps; CONFIG nframes byte)
@@ -33,6 +33,8 @@ STATIC_N = 4
 X0 = 4  # small left margin for scroll start
 HERO_Y = 18  # title scroll top
 ART_Y = 46  # artist line top
+CLOCK_ROLL = 8  # clock card frames per upload: one upload covers this many minutes
+CLOCK_INT = 60000  # device interval per rolled clock frame (ms); must match nowlive
 ARTB_X, ARTB_Y = 4, 4  # cover-art box origin (56x56, art column layout)
 NP = r"D:\Project\keyboard\timeless82\nowplaying\bin\Release\net8.0-windows10.0.22621.0\nowplaying.exe"
 FONT_DIR = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
@@ -81,19 +83,41 @@ def new():
 
 
 def render_idle():
-    """Big local clock + date card. Re-uploaded once a minute by nowlive."""
-    now = datetime.now()
-    hhmm = now.strftime("%H:%M")
-    date = now.strftime("%a %d %b %Y").upper()
+    """Big local clock + date card, as CLOCK_ROLL minute frames per upload.
+
+    Nowlive re-uploads this set when the wall clock leaves it (every
+    CLOCK_ROLL minutes), not every minute: the device loops the set itself.
+    """
+    return clock_roll(CLOCK_ROLL)
+
+
+def clock_roll(n=CLOCK_ROLL, now=None):
+    """The next n minutes as clock-card frames, starting at the minute of `now`.
+
+    The device loops whatever frame set it is given at its own interval with
+    no host involved, so a clock card costs one upload per n minutes instead
+    of one per minute - the whole reason the board stalls key scanning. Each
+    frame carries the minute it will be shown, so the set stays correct for
+    the full n minutes provided the first frame is the current minute (the
+    caller re-rolls when the wall clock leaves the set; see nowlive).
+
+    Slower than real time is just a stale clock, and a minute is not a
+    second: the device replays the set on its own, so drift is bounded by one
+    frame interval (100 < interval < 60000 ms), not accumulated.
+    """
+    t0 = (now or datetime.now()).replace(second=0, microsecond=0)
     frames = []
-    for i in range(STATIC_N):
+    for i in range(n):
+        t = t0 + timedelta(minutes=i)
+        hhmm = t.strftime("%H:%M")
+        date = t.strftime("%a %d %b %Y").upper()
         im, d = new()
         f = font(34)
         d.text((14 + (112 - textw(d, hhmm, f)) // 2, 8), hhmm, font=f, fill=255)
         f2 = font(10)
         d.text((14 + (112 - textw(d, date, f2)) // 2, 52), date, font=f2, fill=255)
         frames.append(im)
-    return frames, "idle", 0, 0, STATIC_N
+    return frames, "idle", 0, 0, n
 
 
 def state_glyph(d, playing, x=3, y=2):
@@ -179,6 +203,10 @@ def get_frames(maxn=MAXN, art=None):
                 title or "?", artist or "?", status == "Playing", maxn, art)
     bw = [im.point(lambda v: 255 if v >= 128 else 0) for im in frames]  # pure B/W
     meta = {"what": what, "n": n, "step": step, "gap": gap_used}
+    if what == "idle":
+        # The clock roll is a set of one-minute frames: tell the device to
+        # pace them at a minute each, so it advances the clock itself.
+        meta["interval"] = CLOCK_INT
     return bw, meta
 
 

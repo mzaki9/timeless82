@@ -135,15 +135,18 @@ running < 3 MB. Python is not involved.
   -> `nowshow.py` (N x 128x64 PNGs `anim_np_0..N-1.png`; layout: top bar =
   drawn transport glyph left (play triangle / pause bars) + date right,
   scrolling **title** hero below the rule, **artist** static centered at
-  the bottom (ellipsized). Idle = big clock + date card, re-uploaded once a
-  minute; a still render is collapsed to a single frame before upload) -> pack -> `oledN`.
+  the bottom (ellipsized). Idle = big clock + date card, uploaded as
+  `CLOCK_ROLL` one-minute frames at a 60000ms device interval, so the
+  keyboard advances the clock itself and one upload covers that many
+  minutes; a still render is collapsed to a single frame before upload) -> pack -> `oledN`.
 - **Panels.** `nowlive.py --mode np|sys|auto|fix` picks what the screen shows
   (persisted in `tray.mode`, chosen from the tray **Screen** menu):
   - `np` — now playing, or the clock/date card when nothing plays.
   - `sys` — system monitor (`nowsys.py`): three labelled bars, `CPU n%`,
     `GPU n%` and `RAM n% TEMP nC`, each label sitting above its own bar.
     Values are live, so the panel re-uploads every `--syssec` seconds
-    (default 10).
+    (default 10); raise it if the keyboard freeze that each upload causes
+    bothers you more than a stale reading does.
   - `auto` — `np` while a track plays, `sys` while idle.
   - `fix` — stuck-pixel repair (`nowfix.py`): 4 frames alternating full-field
     black/white, paced at `PHASE_MS`=250ms by a render-supplied device
@@ -209,8 +212,7 @@ running < 3 MB. Python is not involved.
 - Usage: `py -3 nowlive.py --direct [--once] [poll_sec=5]` (+ `--dry`
   render+pack only, `--speed PXPS` scroll pace default 110, `--interval MS`
   pins a fixed device frame interval instead, `--disp I` default 4, `--maxn N`
-  frame budget 1..128 default 32, `--mode np|sys|auto` panel selection,
-  `--syssec N` system-panel cadence in seconds 1..300 default 10).
+  frame budget 1..128 default 32, `--mode np|sys|auto|fix` panel selection).
   Pace = STEP px per frame interval, and the
   interval is derived as `round(STEP*1000/speed)`, so the frame budget trades
   smoothness against freeze time instead of changing the scroll speed.
