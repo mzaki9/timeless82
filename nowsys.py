@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
-"""System monitor panel: CPU/GPU bars + RAM/temp/battery + clock/net/disk rows.
+"""System monitor panel: CPU / GPU / RAM bars, each labelled with its value,
+plus the GPU temperature on the RAM line.
 
-Stdlib only (ctypes): PDH performance counters for CPU/GPU/net/disk, plus
-kernel32 GlobalMemoryStatusEx (RAM) and GetSystemPowerStatus (battery).
-No pip deps, no admin.
+Two sources, both stdlib:
+  * PDH performance counters (ctypes `pdh.dll`) for CPU %, GPU %.
+  * NVML (`nvml.dll`, the same source `nvidia-smi` reads) for GPU temp.
 
-A counter that this machine does not expose (e.g. Thermal Zone Information on
-many desktops) is simply absent: its field renders as "--". Pdh raises only
-when the query itself cannot be opened or no counter at all could be added.
+Temperature is GPU-only *because this board has no CPU thermal sensor at
+all*: PDH `\\Thermal Zone Information(*)` enumerates 0 instances,
+`MSAcpi_ThermalZoneTemperature` returns "Not supported" and
+`Win32_TemperatureProbe` reports an empty reading. Anything claiming a CPU
+temp here would be inventing one, so the panel prints `TEMP --` when NVML
+is unavailable and never fakes the other.
 
-Usage: nowsys.py -> anim_sys_0.png (dry render for eyeballing).
-nowlive.py imports sample()/render() and uploads via `timeless82.exe oledN`.
+Everything degrades: a counter that is absent renders `--`, a missing GPU
+renders no temperature, and `render` never raises.
 """
 import ctypes
 import os
 import sys
 import time
 from ctypes import wintypes
-from datetime import datetime
 
 import nowshow
 
 STATIC_N = 4
-SMALL = 10  # font px for the two value rows
-HEAD = 10  # font px for the CPU/GPU header labels
+SMALL = 10  # font px for the three label lines
 
 CPU_COUNTER = r"\Processor Information(_Total)\% Processor Time"
 GPU_COUNTER = r"\GPU Engine(*engtype_3D)\Utilization Percentage"
-NET_COUNTER = r"\Network Interface(*)\Bytes Received/sec"
-DISK_COUNTER = r"\PhysicalDisk(_Total)\% Idle Time"
-TEMP_COUNTER = r"\Thermal Zone Information(*)\High Precision Temperature"
 
-PATHS = (CPU_COUNTER, GPU_COUNTER, NET_COUNTER, DISK_COUNTER, TEMP_COUNTER)
+PATHS = (CPU_COUNTER, GPU_COUNTER)
 
 PDH_FMT_DOUBLE = 0x00000200
 GPU_PHYS = "_phys_0_"
 RATE_SETTLE = 0.3  # s between the two collects a PDH rate counter needs
+
+# Label/bar rows: label y, bar outline y (9px tall, so bar bottom y+8).
+ROWS = ((0, 11), (21, 32), (42, 53))
 
 
 class PDH_FMT_COUNTERVALUE(ctypes.Structure):
@@ -58,30 +60,17 @@ class MEMORYSTATUSEX(ctypes.Structure):
                 ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
 
 
-class SYSTEM_POWER_STATUS(ctypes.Structure):
-    _fields_ = [("ACLineStatus", wintypes.BYTE),
-                ("BatteryFlag", wintypes.BYTE),
-                ("BatteryLifePercent", wintypes.BYTE),
-                ("SystemStatusFlag", wintypes.BYTE),
-                ("BatteryLifeTime", wintypes.DWORD),
-                ("BatteryFullLifeTime", wintypes.DWORD)]
-
-
 def _kernel32():
     return ctypes.WinDLL("kernel32")
 
 
 class Pdh:
-    """One PDH query holding all monitored counters.
-
-    Primes with two collects 0.3s apart (rate counters need a delta), then
-    read() does a single collect + array read per counter.
-    """
+    """One PDH query holding the monitored counters."""
 
     def __init__(self, paths=PATHS):
         self._pdh = ctypes.WinDLL("pdh")
-        self._q = wintypes.HANDLE()
         self._counters = {}
+        self._q = wintypes.HANDLE()
         for fn, args in (
             ("PdhOpenQueryW", [wintypes.LPCWSTR, ctypes.c_size_t,
                                ctypes.POINTER(wintypes.HANDLE)]),
@@ -162,6 +151,60 @@ class Pdh:
         self._q = None
 
 
+class Nvml:
+    """GPU temperature, read straight from NVML.
+
+    No subprocess: `nvidia-smi` spawns a process and takes ~1s, which is the
+    entire upload budget. A missing driver or non-NVIDIA GPU leaves `_lib`
+    None and `temp_c()` returns None forever after one failed load.
+    """
+
+    SENSOR_TEMP_GPU = 0
+
+    def __init__(self):
+        self._lib = None
+        self._dev = None
+        try:
+            lib = ctypes.WinDLL(os.path.join(
+                os.environ.get("WINDIR", r"C:\Windows"), "System32",
+                "nvml.dll"))
+            lib.nvmlInit_v2.restype = ctypes.c_int
+            if lib.nvmlInit_v2() != 0:
+                return
+            lib.nvmlDeviceGetHandleByIndex_v2.argtypes = [
+                ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            lib.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+            lib.nvmlDeviceGetTemperature.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+            lib.nvmlDeviceGetTemperature.restype = ctypes.c_int
+            dev = ctypes.c_void_p()
+            if lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0:
+                return
+            self._lib, self._dev = lib, dev
+        except (OSError, AttributeError):
+            self._lib = None
+
+    def temp_c(self):
+        if self._lib is None:
+            return None
+        v = ctypes.c_uint()
+        if self._lib.nvmlDeviceGetTemperature(
+                self._dev, self.SENSOR_TEMP_GPU, ctypes.byref(v)) != 0:
+            return None
+        return float(v.value)
+
+
+_NVML = None
+
+
+def _nvml():
+    """Process-lifetime NVML handle, like the caller's PDH query."""
+    global _NVML
+    if _NVML is None:
+        _NVML = Nvml()
+    return _NVML
+
+
 def _first(vals):
     return next(iter(vals.values())) if vals else None
 
@@ -172,7 +215,7 @@ def _max_where(vals, pred):
 
 
 def sample(pdh=None):
-    """One system snapshot. Missing counters become None (never raises)."""
+    """One system snapshot. Missing values become None (never raises)."""
     if pdh is None:  # one-shot caller (nowsys.py CLI, --dry): own + close
         pdh = Pdh()
         try:
@@ -183,58 +226,31 @@ def sample(pdh=None):
     cpu = _first(vals.get(CPU_COUNTER, {}))
     gpu = _max_where(vals.get(GPU_COUNTER, {}),
                      lambda n: "engtype_3D" in n and GPU_PHYS in n)
-    net = vals.get(NET_COUNTER, {})
-    net_kbps = sum(net.values()) / 1024.0 if net else None
-    disk_idle = _first(vals.get(DISK_COUNTER, {}))
-    disk_pct = None if disk_idle is None else max(0.0, 100.0 - disk_idle)
-    tenths_k = _max_where(vals.get(TEMP_COUNTER, {}), lambda n: True)
-    temp_c = None if tenths_k is None else tenths_k / 10.0 - 273.15
 
     ms = MEMORYSTATUSEX()
     ms.dwLength = ctypes.sizeof(ms)
-    k32 = _kernel32()
     total = avail = 0
-    if k32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+    if _kernel32().GlobalMemoryStatusEx(ctypes.byref(ms)):
         total, avail = ms.ullTotalPhys, ms.ullAvailPhys
     ram_pct = (1.0 - avail / total) * 100.0 if total else 0.0
-
-    sps = SYSTEM_POWER_STATUS()
-    batt_pct = batt_ac = None
-    if k32.GetSystemPowerStatus(ctypes.byref(sps)):
-        batt_ac = sps.ACLineStatus == 1
-        if sps.BatteryLifePercent != 255:
-            batt_pct = int(sps.BatteryLifePercent)
 
     return {"cpu": cpu, "gpu": gpu, "ram_pct": ram_pct,
             "ram_used_gb": (total - avail) / 2**30,
             "ram_total_gb": total / 2**30,
-            "temp_c": temp_c, "net_kbps": net_kbps, "disk_pct": disk_pct,
-            "batt_pct": batt_pct, "batt_ac": batt_ac,
-            "hhmm": datetime.now().strftime("%H:%M")}
+            "gpu_temp_c": _nvml().temp_c()}
 
 
 def _pct(v):
     return "--" if v is None else f"{v:.0f}%"
 
 
-def _kb(v):
-    if v is None:
-        return "--"
-    return f"{v:.0f}K" if v < 1000 else f"{v / 1024:.1f}M"
-
-
 def rows(stats):
-    """(header-left, header-right, row3, row4) text, "--" for absent values."""
-    head_l = f"CPU {_pct(stats['cpu'])}"
-    head_r = f"GPU {_pct(stats['gpu'])}"
-    row3 = f"RAM {_pct(stats['ram_pct'])}"
-    temp = stats["temp_c"]
-    row3 += f" {temp:.0f}C" if temp is not None else " --"
-    if stats["batt_pct"] is not None:
-        row3 += f" BATT {stats['batt_pct']}%"
-    row4 = f"{stats['hhmm']} NET {_kb(stats['net_kbps'])} " \
-           f"DSK {_pct(stats['disk_pct'])}"
-    return head_l, head_r, row3, row4
+    """The three label lines, "--" for anything absent."""
+    temp = stats["gpu_temp_c"]
+    return (f"CPU {_pct(stats['cpu'])}",
+            f"GPU {_pct(stats['gpu'])}",
+            f"RAM {_pct(stats['ram_pct'])}"
+            + (f"  TEMP {temp:.0f}C" if temp is not None else "  TEMP --"))
 
 
 def _row_font(d, *strings, maxw=122):
@@ -247,23 +263,23 @@ def _row_font(d, *strings, maxw=122):
 
 
 def _bar(d, y, frac):
-    d.rectangle([3, y, 124, y + 10], outline=255)
+    d.rectangle([3, y, 124, y + 8], outline=255)
     w = int(118 * (0.0 if frac < 0 else 1.0 if frac > 1 else frac))
     if w:
-        d.rectangle([5, y + 2, 5 + w, y + 8], fill=255)
+        d.rectangle([5, y + 2, 5 + w, y + 6], fill=255)
 
 
 def render(stats):
     """4 identical frames + meta. Never raises on missing values."""
-    head_l, head_r, row3, row4 = rows(stats)
+    labels = rows(stats)
+    fractions = ((stats["cpu"] or 0.0) / 100.0,
+                 (stats["gpu"] or 0.0) / 100.0,
+                 (stats["ram_pct"] or 0.0) / 100.0)
     im, d = nowshow.new()
-    d.text((3, 0), head_l, font=nowshow.font(HEAD), fill=255)
-    d.text((67, 0), head_r, font=nowshow.font(HEAD), fill=255)
-    _bar(d, 15, (stats["cpu"] or 0.0) / 100.0)
-    _bar(d, 29, (stats["gpu"] or 0.0) / 100.0)
-    fr = _row_font(d, row3, row4)
-    d.text((3, 41), row3, font=fr, fill=255)
-    d.text((3, 53), row4, font=fr, fill=255)
+    f = _row_font(d, *labels)
+    for lab, ((ly, by), frac) in zip(labels, zip(ROWS, fractions)):
+        d.text((3, ly), lab, font=f, fill=255)
+        _bar(d, by, frac)
     frames = [im.copy() for _ in range(STATIC_N)]
     return frames, {"what": "sys", "n": STATIC_N, "step": 0, "gap": 0}
 
@@ -292,8 +308,8 @@ def main():
         if idx >= meta["n"]:
             os.remove(stale)
     print(f"wrote anim_sys_0.png frames={meta['n']}")
-    for k in ("cpu", "gpu", "ram_pct", "ram_used_gb", "ram_total_gb", "temp_c",
-              "net_kbps", "disk_pct", "batt_pct", "batt_ac", "hhmm"):
+    for k in ("cpu", "gpu", "ram_pct", "ram_used_gb", "ram_total_gb",
+              "gpu_temp_c"):
         print(f"  {k}={stats[k]!r}")
     print(f"  rows={rows(stats)}")
     print(f"render_time={time.time() - t0:.2f}s")

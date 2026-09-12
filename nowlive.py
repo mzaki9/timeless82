@@ -27,7 +27,7 @@ Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--
 
 Panels (--mode, persisted in tray.mode, chosen from the tray Screen menu):
 `np` = now playing, or the clock/date card when nothing plays; `sys` =
-system monitor (CPU/GPU bars + RAM/temp/battery/net/disk); `auto` = `np`
+system monitor (CPU/GPU/RAM bars + GPU temp); `auto` = `np`
 while a track plays, `sys` while idle; `fix` = stuck-pixel repair (full-field
 black/white cycle, `nowfix.py`) for --fixsec seconds, then it hands the
 preference back to auto. The sys panel re-uploads every

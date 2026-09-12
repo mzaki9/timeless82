@@ -140,17 +140,26 @@ running < 3 MB. Python is not involved.
 - **Panels.** `nowlive.py --mode np|sys|auto|fix` picks what the screen shows
   (persisted in `tray.mode`, chosen from the tray **Screen** menu):
   - `np` — now playing, or the clock/date card when nothing plays.
-  - `sys` — system monitor (`nowsys.py`): CPU + GPU bars, then
-    `RAM n%`, temperature, battery, clock, network, disk rows. Values are
-    live, so the panel re-uploads every `--syssec` seconds (default 10).
+  - `sys` — system monitor (`nowsys.py`): three labelled bars, `CPU n%`,
+    `GPU n%` and `RAM n% TEMP nC`, each label sitting above its own bar.
+    Values are live, so the panel re-uploads every `--syssec` seconds
+    (default 10).
   - `auto` — `np` while a track plays, `sys` while idle.
   - `fix` — stuck-pixel repair (`nowfix.py`): 4 frames alternating full-field
     black/white, paced at `PHASE_MS`=250ms by a render-supplied device
     interval, so the panel runs 2 full on/off cycles a second on its own.
     Held for `--fixsec` (default 30), then nowlive rewrites `tray.mode` back
     to `auto` so the run cannot leave the keyboard strobing forever.
-  Missing counters render `--` (this machine exposes no Thermal Zone
-  Information, so temperature is always `--`); nothing raises.
+  Missing counters render `--`; nothing raises.
+- **The system panel's temperature is GPU-only, because that is the only
+  sensor this board has.** PDH `\Thermal Zone Information(*)` enumerates
+  0 instances, `MSAcpi_ThermalZoneTemperature` returns "Not supported" and
+  `Win32_TemperatureProbe` reports an empty reading, so a CPU temperature
+  cannot be read at all — a `CPU nC` field would be fabricated. GPU temp
+  comes from NVML (`nvml.dll`, the same source `nvidia-smi` reads) through
+  `ctypes`, not a subprocess: `nvidia-smi` costs ~1s, the whole upload
+  budget. No NVIDIA GPU or driver → `TEMP --`. Clock, battery, network and
+  disk rows were removed as not wanted.
 - **Stuck-pixel repair beats a per-pixel sweep.** A serpentine "snake" that
   lights one pixel at a time cannot cover the panel: `MAXN` is 128 frames, so
   one snake upload visits 128 of 8192 pixels and a full pass would need 64
