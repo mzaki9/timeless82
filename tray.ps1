@@ -1,9 +1,12 @@
 # tray.ps1 — tray menu + autostart for nowlive.py (zero deps, WinForms only).
 #   powershell -File tray.ps1                       # tray icon (default)
 #   powershell -File tray.ps1 -Action start|stop|enable|disable|status|install|uninstall|icon
-#   powershell -File tray.ps1 -Action mode -Mode np|sys|auto
+#   powershell -File tray.ps1 -Action mode -Mode np|sys|auto|fix
 # Menu: Enabled (start/stop nowlive), Screen (which panel nowlive shows),
 # Start with Windows (add/remove the Startup shortcut), Open log, Exit.
+# Screen's Fix stuck pixels is a timed repair run: nowlive holds the
+# black/white cycle for --fixsec (default 30s), then rewrites tray.mode back
+# to auto itself, so the checkmark follows the panel instead of lying.
 # Enabled is persisted in tray.state, so unchecking it survives a reboot:
 # the tray still starts at login but leaves nowlive off until you re-check it.
 # Screen is persisted in tray.mode and applied at launch (nowlive takes
@@ -16,7 +19,7 @@ param(
     [string]$Action = 'tray',
     [string]$NowLiveArgs = '--direct',
     [string]$IconPath = '',
-    [ValidateSet('np', 'sys', 'auto')]
+    [ValidateSet('np', 'sys', 'auto', 'fix')]
     [string]$Mode = '',
     [switch]$NoAutoStart
 )
@@ -30,7 +33,7 @@ $PIDFILE = Join-Path $HERE 'nowlive.pid'
 $STATE = Join-Path $HERE 'tray.state'
 $MODEFILE = Join-Path $HERE 'tray.mode'
 $PS = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$MODES = 'np', 'sys', 'auto'
+$MODES = 'np', 'sys', 'auto', 'fix'
 
 function Install-Autostart {
     $sh = New-Object -ComObject WScript.Shell
@@ -310,10 +313,12 @@ $miScreen = New-Object System.Windows.Forms.ToolStripMenuItem 'Screen'
 $miModeNp = New-Object System.Windows.Forms.ToolStripMenuItem 'Now playing'
 $miModeSys = New-Object System.Windows.Forms.ToolStripMenuItem 'System monitor'
 $miModeAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Auto'
-foreach ($mi in @($miModeNp, $miModeSys, $miModeAuto)) {
+$miModeFix = New-Object System.Windows.Forms.ToolStripMenuItem 'Fix stuck pixels'
+foreach ($mi in @($miModeNp, $miModeSys, $miModeAuto, $miModeFix)) {
     $mi.CheckOnClick = $false  # exclusive radio: the checked one is the truth
 }
-$miScreen.DropDownItems.AddRange(@($miModeNp, $miModeSys, $miModeAuto))
+$miScreen.DropDownItems.AddRange(@($miModeNp, $miModeSys, $miModeAuto,
+    (New-Object System.Windows.Forms.ToolStripSeparator), $miModeFix))
 $miAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Start with Windows'
 $miAuto.CheckOnClick = $true
 $miAuto.Checked = Test-Autostart
@@ -344,6 +349,7 @@ function Sync-Tray {
     $miModeNp.Checked = $m -eq 'np'
     $miModeSys.Checked = $m -eq 'sys'
     $miModeAuto.Checked = $m -eq 'auto'
+    $miModeFix.Checked = $m -eq 'fix'
     $icon.Icon = $(if ($live) { $script:iconOn } else { $script:iconOff })
     $icon.Text = 'Timeless82 now-playing: ' + $(if ($live) { 'on' } else { 'off' })
 }
@@ -367,6 +373,7 @@ $miEnabled.Add_Click({
 $miModeNp.Add_Click({ Set-ScreenMode 'np' })
 $miModeSys.Add_Click({ Set-ScreenMode 'sys' })
 $miModeAuto.Add_Click({ Set-ScreenMode 'auto' })
+$miModeFix.Add_Click({ Set-ScreenMode 'fix' })
 $miAuto.Add_Click({
     if ($miAuto.Checked) { Install-Autostart } else { Uninstall-Autostart }
     Sync-Tray

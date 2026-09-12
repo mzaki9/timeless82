@@ -136,16 +136,31 @@ running < 3 MB. Python is not involved.
   drawn transport glyph left (play triangle / pause bars) + date right,
   scrolling **title** hero below the rule, **artist** static centered at
   the bottom (ellipsized). Idle = big clock + date card, re-uploaded once a
-  minute; short/idle = STATIC_N=4 identical frames) -> pack -> `oledN`.
-- **Panels.** `nowlive.py --mode np|sys|auto` picks what the screen shows
+  minute; a still render is collapsed to a single frame before upload) -> pack -> `oledN`.
+- **Panels.** `nowlive.py --mode np|sys|auto|fix` picks what the screen shows
   (persisted in `tray.mode`, chosen from the tray **Screen** menu):
   - `np` — now playing, or the clock/date card when nothing plays.
   - `sys` — system monitor (`nowsys.py`): CPU + GPU bars, then
     `RAM n%`, temperature, battery, clock, network, disk rows. Values are
-    live, so the panel re-uploads every `--syssec` seconds (default 5).
+    live, so the panel re-uploads every `--syssec` seconds (default 10).
   - `auto` — `np` while a track plays, `sys` while idle.
+  - `fix` — stuck-pixel repair (`nowfix.py`): 4 frames alternating full-field
+    black/white, paced at `PHASE_MS`=250ms by a render-supplied device
+    interval, so the panel runs 2 full on/off cycles a second on its own.
+    Held for `--fixsec` (default 30), then nowlive rewrites `tray.mode` back
+    to `auto` so the run cannot leave the keyboard strobing forever.
   Missing counters render `--` (this machine exposes no Thermal Zone
   Information, so temperature is always `--`); nothing raises.
+- **Stuck-pixel repair beats a per-pixel sweep.** A serpentine "snake" that
+  lights one pixel at a time cannot cover the panel: `MAXN` is 128 frames, so
+  one snake upload visits 128 of 8192 pixels and a full pass would need 64
+  uploads, each with its own ~0.6s keyboard freeze. Full-field black/white
+  drives every pixel to an extreme in 4 frames / 4KB / ~0.9s, and the device
+  loops it for free. Per-cell drive current is the same either way, so the
+  snake buys no extra stress — and for *locating* a defect uniform fields
+  win too: stuck-on shows as a bright dot on the black phase, stuck-off as a
+  dark dot on white. R/G/B flash cycling (the LCD trick) is skipped: the
+  panel is 1-bit monochrome, so any non-grey field is identical to white.
 - **Album art.** When the session has a thumbnail, `nowart.py` decodes it,
   center-crops to a square (no stretch), autocontrasts and thresholds to
   1-bit, and `nowshow.render_track` lays it out as a 56x56 left column with
@@ -155,9 +170,18 @@ running < 3 MB. Python is not involved.
   STATIC_N=4 when short/idle (step 0);
   else `--maxn` (default 64, hard cap MAXN=128) sets a frame budget, with the
   smallest integer STEP = ceil((tw+MIN_GAP)/maxn) -> N*STEP==L exact seam
-  (frameN byte-identical frame0); stale PNGs >= N deleted. Upload time (and
-  keyboard freeze) is ~65ms/frame, so maxn trades scroll speed vs freeze:
-  long title -> 32 frames ~2.1s, 64 ~4.1s, 128 ~8.2s. Pace = STEP px per
+  (frameN byte-identical frame0); stale PNGs >= N deleted.
+- **Still renders collapse to one frame.** `nowlive.collapse_frames` drops
+  trailing frames identical to the first before packing, so clock/sys/short
+  titles upload `n=1` (they are duplicated only to satisfy the marquee-loop
+  convention; the device replays what it is given). Only the direct path
+  collapses - the JSON path writes the stock app's fixed 4 slots 0..3, where
+  a shorter array would leave stale frames animating. Upload time (and
+  keyboard freeze) is one fixed INIT..COMMIT handshake plus ~62ms/frame
+  measured on the wire: session ~467 + 62n ms. Interleaved A/B, same payload:
+  1 frame 575ms vs 4 frames 742ms -> collapsing saves ~167ms (22%) per still.
+  maxn therefore trades scroll speed vs freeze: long title -> 32 frames
+  ~2.5s, 64 ~4.4s, 128 ~8.4s. Pace = STEP px per
   frame interval, and the interval is derived from `--speed PXPS` (default
   110), so `--maxn` trades smoothness (smaller STEP) against freeze time
   without changing how fast the text crosses the screen.
@@ -177,7 +201,7 @@ running < 3 MB. Python is not involved.
   render+pack only, `--speed PXPS` scroll pace default 110, `--interval MS`
   pins a fixed device frame interval instead, `--disp I` default 4, `--maxn N`
   frame budget 1..128 default 32, `--mode np|sys|auto` panel selection,
-  `--syssec N` system-panel cadence in seconds 1..300 default 5).
+  `--syssec N` system-panel cadence in seconds 1..300 default 10).
   Pace = STEP px per frame interval, and the
   interval is derived as `round(STEP*1000/speed)`, so the frame budget trades
   smoothness against freeze time instead of changing the scroll speed.
@@ -200,9 +224,13 @@ running < 3 MB. Python is not involved.
   its key matrix off for the whole session (INIT..COMMIT). So the loop does
   not fight it, it just uploads less and only at rest:
   (a) `--maxn` caps frames; (b) 2s debounce collapses rapid track-skipping
-  into a single upload; (c) `--idle-ms` (default 1500; 0 disables) defers
+  into a single upload; (c) `--idle-ms` (default 4000; 0 disables) defers
   the direct upload until no keyboard/mouse input (the sys panel skips the
   debounce: its key is time-bucketed, so there is nothing to collapse).
+  The gate is set above the ~1.5s pause a typist normally takes mid-thought,
+  so an upload lands when you are looking at the panel rather than when you
+  resume: at the old 1500ms a 5s sys cadence kept the board stalled for
+  ~8s/min and regularly ate the first keystrokes after a short pause.
   When a track changes
   while you are typing it prints `deferred (input Nms ago)` and uploads the
   moment you pause. `--once` uploads immediately.

@@ -20,16 +20,18 @@ keyboard freeze (~65ms/frame), chunkier motion. Track changes are debounced
 (2s settle) so rapid skipping = one upload, not many.
 The board's firmware stalls keyboard scanning while it ingests a display
 upload (~65ms per frame), so a running loop uploads only when the user is
-idle: it waits for no keyboard/mouse input for --idle-ms (default 1500)
+idle: it waits for no keyboard/mouse input for --idle-ms (default 4000)
 before starting, and defers otherwise. --once uploads immediately.
 
-Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [--mode np|sys|auto] [--syssec N] [interval_sec=5]
+Usage: nowlive.py [--once] [--direct] [--dry] [--speed PXPS] [--interval MS] [--disp I] [--idle-ms N] [--maxn N] [--mode np|sys|auto|fix] [--syssec N] [--fixsec N] [interval_sec=5]
 
 Panels (--mode, persisted in tray.mode, chosen from the tray Screen menu):
 `np` = now playing, or the clock/date card when nothing plays; `sys` =
 system monitor (CPU/GPU bars + RAM/temp/battery/net/disk); `auto` = `np`
-while a track plays, `sys` while idle. The sys panel re-uploads every
---syssec seconds (default 5) because its values are live; the clock card
+while a track plays, `sys` while idle; `fix` = stuck-pixel repair (full-field
+black/white cycle, `nowfix.py`) for --fixsec seconds, then it hands the
+preference back to auto. The sys panel re-uploads every
+--syssec seconds (default 10) because its values are live; the clock card
 re-uploads once a minute. Album art is dumped by nowplaying.exe to np_art.bin
 and used when the session has a thumbnail.
 """
@@ -47,16 +49,18 @@ MAXN_DEFAULT = 32  # default frame budget: short upload, short keyboard freeze
 DISP = 4  # 0-based screen index: 4 = screen 5 (user anim)
 SPEED = 110  # target scroll pace px/s; the frame interval is derived from it
 INTERVAL = None  # explicit --interval MS override; None = derive from SPEED
-IDLE_MS = 1500  # only start an upload after this long with no keyboard/mouse
+IDLE_MS = 4000  # only start an upload after this long with no keyboard/mouse
 DEBOUNCE = 2.0  # settle time before uploading (collapses rapid track skips)
-MODES = ("np", "sys", "auto")  # np = media/clock, sys = system monitor
+MODES = ("np", "sys", "auto", "fix")  # np = media/clock, sys = system monitor
 MODE_DEFAULT = "auto"  # auto: sys while nothing plays, np otherwise
-SYS_SEC = 5  # system panel re-upload cadence (seconds)
+SYS_SEC = 10  # system panel re-upload cadence (seconds)
+FIX_SEC = 30  # `fix` holds the stuck-pixel cycle this long, then np resumes
 ART = HERE + r"\np_art.bin"  # thumbnail dump target handed to nowplaying.exe
 NP_ARGS = [NP, ART]
 
 sys.path.insert(0, HERE)
 import nowart
+import nowfix
 import nowshow
 import nowsys
 from datetime import datetime
@@ -91,8 +95,17 @@ def has_track(cur):
         bool((cur.split("\t") + [""])[1])
 
 
-def panel_for(cur, mode):
-    """Which panel this tick should show."""
+def panel_for(cur, mode, fix_until=0.0):
+    """Which panel this tick should show.
+
+    `fix` is a temporary override of `auto`: once its repair window lapses the
+    panel falls back the same way auto would, so a stuck-pixel run cannot
+    leave the keyboard strobing black/white indefinitely.
+    """
+    if mode == "fix":
+        if time.time() < fix_until:
+            return "fix"
+        return "np" if has_track(cur) else "sys"
     if mode in ("np", "sys"):
         return mode
     return "np" if has_track(cur) else "sys"
@@ -100,6 +113,10 @@ def panel_for(cur, mode):
 
 def change_key(panel, cur, sys_sec=SYS_SEC):
     """What an upload depends on: the only thing that re-uploads a panel."""
+    if panel == "fix":
+        # Constant: the device loops the cycle itself, so one upload repairs
+        # for as long as the panel is up. Re-uploading would only add freeze.
+        return ("fix", "", 0)
     if panel == "sys":
         return ("sys", "", int(time.time() // sys_sec))
     if not has_track(cur):
@@ -130,10 +147,33 @@ def pack_frames(frames):
     return bytes(out)
 
 
+def release_fix(mode_file=HERE + r"\tray.mode"):
+    """Give the panel preference back after a `fix` run lapses.
+
+    nowlive owns which panel is up; tray.mode is the persisted preference the
+    tray renders as a checkmark. A fix run is an override, so on expiry the
+    file is reset to auto (only if it still says `fix`, so an explicit CLI
+    one-off never clobbers a real preference).
+    """
+    import os
+    try:
+        if os.path.exists(mode_file):
+            with open(mode_file, encoding="utf-8") as f:
+                if f.read().strip() == "fix":
+                    with open(mode_file, "w", encoding="utf-8") as f2:
+                        f2.write("auto")
+                    print(f"[{time.strftime('%H:%M:%S')}] fix window over: "
+                          f"mode -> auto", flush=True)
+    except OSError as e:
+        print(f"mode file reset failed: {e}", flush=True)
+
+
 def render_frames(panel, maxn=MAXN, pdh=None):
     """Render the selected panel. Returns (frames, meta); may raise."""
     if panel == "sys":
         return nowsys.render(nowsys.sample(pdh))
+    if panel == "fix":
+        return nowfix.render()
     src = nowart.load(ART)
     return nowshow.get_frames(maxn, nowart.art_image(src) if src else None)
 
@@ -150,6 +190,26 @@ def save_pngs(frames, n):
             continue
         if idx >= n:
             os.remove(stale)
+
+
+def collapse_frames(frames):
+    """Drop trailing frames byte-identical to the first.
+
+    Renders of still content (clock card, sys panel, a short title) repeat one
+    image STATIC_N times out of the marquee-loop convention, but the device
+    replays whatever it was given, so the repeats are pure upload cost: the
+    board stalls key scanning for the whole INIT..COMMIT session and every
+    frame adds ~62ms to it (~186ms for the 4-frame still). A scroll
+    (step != 0) always has distinct frames and is returned untouched.
+
+    Only the direct path collapses: the JSON path writes into the stock app's
+    fixed 4 slots 0..3, where a shorter array would leave stale frames
+    animating on screen.
+    """
+    if len(frames) > 1 and all(f.tobytes() == frames[0].tobytes()
+                                for f in frames[1:]):
+        return frames[:1]
+    return frames
 
 
 def refresh_json(maxn=MAXN, panel="np", pdh=None):
@@ -184,6 +244,8 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
     t0 = time.time()
     try:
         frames, meta = render_frames(panel, maxn, pdh)
+        frames = collapse_frames(frames)
+        meta = dict(meta, n=len(frames))
         n = meta["n"]
         save_pngs(frames, n)
         bin_bytes = pack_frames(frames)
@@ -194,9 +256,12 @@ def refresh_direct(dry=False, disp=DISP, interval=INTERVAL, maxn=MAXN,
             print(f"rendered+packed dry n={n} ({ms}ms) -> {BIN}", flush=True)
             return True
         step = meta["step"]
-        # Only a scrolling render has a STEP to spread over an interval; a
-        # static frame ignores it, so 1000 just keeps the value sane.
-        iv = interval or (round(step * 1000 / speed) if step else 1000)
+        # A render may pin its own device interval (the fix cycle needs fast
+        # phases, not the step-0 1s fallback). Only a scrolling render has a
+        # STEP to spread over an interval; a static frame ignores it, so 1000
+        # just keeps the value sane.
+        iv = interval or meta.get("interval") or \
+            (round(step * 1000 / speed) if step else 1000)
         iv = min(max(int(iv), 1), 60000)
         r2 = subprocess.run([EXE, "oledN", BIN, str(n), str(disp), str(iv)],
                             check=True, capture_output=True, text=True,
@@ -233,6 +298,7 @@ def main(argv):
     disp, interval, idle_gate, maxn = DISP, INTERVAL, IDLE_MS, MAXN_DEFAULT
     speed = SPEED
     mode, sys_sec = MODE_DEFAULT, SYS_SEC
+    fix_sec = FIX_SEC
     poll = 5
     args = list(argv[1:])
     i = 0
@@ -253,6 +319,8 @@ def main(argv):
             mode = nxt; i += 2; continue
         if a == "--syssec" and nxt.isdigit():
             sys_sec = min(max(int(nxt), 1), 300); i += 2; continue
+        if a == "--fixsec" and nxt.isdigit():
+            fix_sec = min(max(int(nxt), 1), 3600); i += 2; continue
         if a.startswith("--interval=") and a.split("=", 1)[1].isdigit():
             interval = min(max(int(a.split("=", 1)[1]), 1), 60000)
         elif a.startswith("--speed=") and a.split("=", 1)[1].isdigit():
@@ -265,6 +333,8 @@ def main(argv):
             mode = a.split("=", 1)[1]
         elif a.startswith("--syssec=") and a.split("=", 1)[1].isdigit():
             sys_sec = min(max(int(a.split("=", 1)[1]), 1), 300)
+        elif a.startswith("--fixsec=") and a.split("=", 1)[1].isdigit():
+            fix_sec = min(max(int(a.split("=", 1)[1]), 1), 3600)
         elif a.isdigit():
             poll = min(max(int(a), 1), 300)  # bare positional = poll seconds
         i += 1
@@ -275,6 +345,7 @@ def main(argv):
     print(f"poll every {poll}s, --once={once} --direct={direct} "
           f"--dry={dry} disp={disp} interval={interval or 'auto'} "
           f"speed={speed}px/s maxn={maxn} mode={mode} syssec={sys_sec} "
+          f"fixsec={fix_sec} "
           f"idle_gate={'on' if gate_upload else 'off'}"
           + (f" ({idle_gate}ms)" if gate_upload else ""), flush=True)
     pdh = None
@@ -287,6 +358,10 @@ def main(argv):
     last = None
     pending = None
     pending_at = 0.0
+    # `--mode fix` is a timed override: the repair cycle runs for --fixsec
+    # (or a process restart, whichever first) and then normal panels resume.
+    fix_until = time.time() + fix_sec if mode == "fix" else 0.0
+    fix_done = False
 
     def refresh(panel):
         if direct:
@@ -303,7 +378,10 @@ def main(argv):
                 if once:
                     return 0
                 continue
-            panel = panel_for(cur, mode)
+            panel = panel_for(cur, mode, fix_until)
+            if mode == "fix" and not fix_done and time.time() >= fix_until:
+                fix_done = True
+                release_fix()
             if panel == "sys" and pdh is None:
                 try:
                     pdh = nowsys.Pdh()
